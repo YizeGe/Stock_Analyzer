@@ -9,3 +9,4 @@ venv/
 # Application data
 userdata/
 config.json
+review/
