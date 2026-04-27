@@ -2014,6 +2014,7 @@ class StockAnalyzerApp:
         self.chat_text.config(state="disabled")
 
     def _call_deepseek(self, messages):
+        print("[_call_deepseek] 被调用", flush=True)
         if not self.config.get("api_key"):
             self.root.after(0, lambda: self.append_chat("【系统】请先在上方配置 DeepSeek API Key。", "system"))
             return None
@@ -2023,17 +2024,69 @@ class StockAnalyzerApp:
             self.root.after(0, lambda: self.append_chat("【系统】缺少库，请运行 pip install openai。", "system"))
             return None
             
-        client = OpenAI(api_key=self.config["api_key"], base_url="https://api.deepseek.com", timeout=30.0)
-        try:
-            resp = client.chat.completions.create(
-                model="deepseek-chat",
-                messages=messages,
-                response_format={"type": "json_object"}
-            )
-            return json.loads(resp.choices[0].message.content)
-        except Exception as e:
-            self.root.after(0, lambda err=str(e): self.append_chat(f"【系统】AI 请求失败: {err}", "system"))
+        client = OpenAI(api_key=self.config["api_key"], base_url="https://api.deepseek.com", timeout=120.0)
+        
+        def _try_parse(raw_text):
+            """尝试从文本中提取 JSON，支持 markdown 包裹"""
+            import re
+            if not raw_text:
+                return None
+            raw = raw_text.strip()
+            # 去掉可能的 markdown 代码块
+            if raw.startswith("```"):
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```\s*$", "", raw)
+                raw = raw.strip()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+            # 正则提取第一个完整 JSON 对象
+            m = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', raw, re.DOTALL)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
             return None
+        
+        try:
+            # 第一轮：强制 JSON 模式（最可靠）
+            resp = client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+            )
+            raw = resp.choices[0].message.content
+            print(f"[_call_deepseek] round1 raw ({len(raw) if raw else 0} chars, first 200): {(raw or '')[:200]}", flush=True)
+            parsed = _try_parse(raw)
+            if parsed:
+                return parsed
+            print("[_call_deepseek] round1 parse failed, retrying without json_object...", flush=True)
+        except Exception as e1:
+            print(f"[_call_deepseek] round1 error: {type(e1).__name__}: {e1}", flush=True)
+        
+        try:
+            # 第二轮：不带 json_object 约束，从自由文本中提取 JSON
+            resp = client.chat.completions.create(
+                model="deepseek-v4-flash",
+                messages=messages,
+                max_tokens=4096,
+            )
+            raw = resp.choices[0].message.content
+            print(f"[_call_deepseek] round2 raw ({len(raw) if raw else 0} chars, first 200): {(raw or '')[:200]}", flush=True)
+            parsed = _try_parse(raw)
+            if parsed:
+                return parsed
+            # 彻底无法解析 JSON，把原始文本包装成 reply 返回
+            if raw:
+                print("[_call_deepseek] 无法提取JSON，返回原始文本作为reply", flush=True)
+                return {"operations": [], "reply": raw.strip()}
+        except Exception as e2:
+            print(f"[_call_deepseek] round2 error: {type(e2).__name__}: {e2}", flush=True)
+        
+        raise ValueError("两次API调用均未获取到有效内容")
 
     def send_ai_msg(self, prompt=None):
         msg = prompt or self.chat_entry.get().strip()
@@ -2047,7 +2100,10 @@ class StockAnalyzerApp:
         
         self.append_chat(f"🤖 AI 在思考中...", "system")
         def go():
+            import time
+            print("[DEBUG] go() 开始", flush=True)
             avail_cash = self.config.get("avail_cash", self.config.get("total_cash", 1000000.0))
+            print(f"[DEBUG] 可用现金: {avail_cash}", flush=True)
             
             system_prompt = f'''你是一个模拟炒股交易员与智能记账助手。你非常善于理解用户的自然语言指令。
 
@@ -2089,11 +2145,14 @@ class StockAnalyzerApp:
             
             # 把当前输入记录到内存上下文
             self.ai_messages.append({"role": "user", "content": msg})
-            
+            print("[DEBUG] ai_messages 已添加", len(self.ai_messages), "条", flush=True)
+
             # 取最近的记录发送给 AI (保障上下文存在，且携带最新的 system_prompt 状态)
             messages = [{"role": "system", "content": system_prompt}] + self.ai_messages[-20:]
-            
+            print(f"[DEBUG] 准备调用 _call_deepseek，messages 共 {len(messages)} 条", flush=True)
+
             res = self._call_deepseek(messages)
+            print(f"[DEBUG] _call_deepseek 返回: {res}", flush=True)
             if not res:
                 self.ai_messages.pop()  # 防止失败的 prompt 污染内存
                 self.root.after(0, lambda: self._process_ai_result(None)) # trigger cleanup
@@ -2109,16 +2168,42 @@ class StockAnalyzerApp:
 
         threading.Thread(target=go, daemon=True).start()
 
-    def _process_ai_result(self, res):
+    def _delete_thinking_line(self):
+        """精确删除聊天区域中的 AI 思考提示行（不影响其他内容）"""
+        try:
+            # 从最后一行向上搜索，找包含思考提示的行
+            end_line = int(self.chat_text.index("end-1c").split(".")[0])
+            for line_num in range(end_line, max(end_line - 5, 1), -1):
+                line_text = self.chat_text.get(f"{line_num}.0", f"{line_num}.end")
+                if "AI 在思考中" in line_text:
+                    self.chat_text.delete(f"{line_num}.0", f"{line_num}.0 lineend+1c")
+                    break
+        except Exception:
+            pass
+
+    def _clear_thinking(self):
+        """删除 AI 思考提示"""
         self.chat_text.config(state="normal")
-        self.chat_text.delete("end-2l", "end-1l") # 删掉思考中
+        self._delete_thinking_line()
+        self.chat_text.config(state="disabled")
+
+    def _process_ai_result(self, res):
+        """处理 AI 返回结果，删除思考提示并显示回复"""
+        self.chat_text.config(state="normal")
+        self._delete_thinking_line()
         self.chat_text.config(state="disabled")
         
         if not res:
             return
 
-        reply = res.get("reply", "")
-        self.append_chat(f"🤖 AI: {reply}\n", "ai")
+        try:
+            reply = res.get("reply", "")
+            if not reply:
+                self.append_chat("【系统】AI 未返回有效回复内容，请重试。", "system")
+                return
+            self.append_chat(f"🤖 AI: {reply}\n", "ai")
+        except Exception as e:
+            self.append_chat(f"【系统】显示AI回复时出错: {e}", "system")
 
         # 兼容旧格式（单个 action）和新格式（operations 数组）
         operations = res.get("operations", [])
@@ -2205,10 +2290,13 @@ class StockAnalyzerApp:
     def request_ai_advice(self):
         mkt = self.market_status
         mkt_desc = f"大盘MA20状态: {'多头' if mkt and mkt.get('above_ma20') else '空头'}"
-        rec_list = [f"{r['name']}({r['symbol']}) 信号:{'||'.join(r['reason'])}" for r in self.recommended[:5]]
+        if self.recommended:
+            rec_list = [f"{r['name']}({r['symbol']}) 信号:{'||'.join(r['reason'])}" for r in self.recommended[:5]]
+        else:
+            rec_list = ["暂无推荐数据（请先刷新市场数据）"]
         
         prompt = f"请结合以下环境给我今明两天的模拟赛交易建议。1.当前环境:{mkt_desc}。2.系统为你推荐了今日热股：{json.dumps(rec_list, ensure_ascii=False)}。请指出我要不要动现在的持仓，以及要不要买新股。返回的 action 设为 'ADVICE'。"
-        self.append_chat("【系统】正在把当前持仓数据、大盘状态与当晚推荐股池发送给 AI 获取最新意见...", "system")
+        self.append_chat(f"👤 请求操作建议（基于当前持仓与市场推荐）", "user")
         self.send_ai_msg(prompt)
 
 # ============================================================
