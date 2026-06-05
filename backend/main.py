@@ -116,6 +116,15 @@ async def login_page(request: Request):
     return HTMLResponse(content=LOGIN_HTML)
 
 
+@app.get("/register")
+async def register_page(request: Request):
+    """注册页面"""
+    if get_current_user(request):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/")
+    return HTMLResponse(content=REGISTER_HTML)
+
+
 @app.post("/api/auth/login")
 async def api_login(request: Request):
     data = await request.json()
@@ -129,11 +138,26 @@ async def api_login(request: Request):
     return {"ok": False, "error": "用户名或密码错误"}
 
 
+@app.get("/api/auth/captcha")
+async def api_captcha(request: Request):
+    from storage import generate_captcha
+    q, ans = generate_captcha()
+    request.session["captcha_ans"] = ans
+    return {"question": q}
+
+
 @app.post("/api/auth/register")
 async def api_register(request: Request):
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "")
+    captcha = data.get("captcha", "").strip()
+
+    # 验证人机验证
+    correct_ans = request.session.get("captcha_ans", "")
+    if captcha != correct_ans:
+        return {"ok": False, "error": "验证码错误"}
+    request.session["captcha_ans"] = ""  # 用完即弃
 
     from storage import register_user
     err = register_user(username, password)
@@ -399,7 +423,7 @@ async def api_remove_holding(req: Request):
     sell_price = float(data.get("price", 0))
     sell_shares_input = float(data.get("shares", 0))
 
-    holdings = load_holdings()
+    holdings = load_holdings(username=user)
     removed_shares = 0
     cost_price = 0
     h_name = symbol
@@ -421,14 +445,14 @@ async def api_remove_holding(req: Request):
         else:
             new_holdings.append(h)
 
-    save_holdings(new_holdings)
+    save_holdings(new_holdings, username=user)
 
     if removed_shares > 0 and sell_price > 0:
         pnl = (sell_price - cost_price) * removed_shares
-        cfg = load_config()
+        cfg = load_config(username=user)
         cfg["avail_cash"] = cfg.get("avail_cash", cfg.get("total_cash", 1000000.0)) + sell_price * removed_shares
-        save_config(cfg)
-        record_trade("SELL", symbol, h_name, sell_price, removed_shares, cost_price, cfg.get("avail_cash", 0))
+        save_config(cfg, username=user)
+        record_trade("SELL", symbol, h_name, sell_price, removed_shares, cost_price, cfg.get("avail_cash", 0), username=user)
 
     return {"ok": True, "message": f"已处理 {symbol} 卖出 {removed_shares}股"}
 
@@ -534,7 +558,6 @@ async def api_ai_chat(req: Request):
         content = content.strip()
 
         # 处理模型可能返回的各种代码块包裹格式
-        # ```json {...} ``` 或 ``` {...} ```
         import re
         json_match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', content)
         if json_match:
@@ -544,13 +567,9 @@ async def api_ai_chat(req: Request):
     except Exception as e:
         import traceback
         print(f"[AI ERROR] {traceback.format_exc()}", flush=True)
-        try:
-            print(f"[AI ERROR] Raw: {repr((content or 'None')[:300])}", flush=True)
-        except:
-            pass
-        # 如果模型返回了纯文本（非JSON），解析失败时兜底
-        if content and not content.startswith('{'):
-            result = {"operations": [], "reply": content}
+        _c = locals().get('content', None)
+        if _c and isinstance(_c, str) and not _c.startswith('{'):
+            result = {"operations": [], "reply": _c}
         else:
             result = {"operations": [], "reply": f"❌ AI 调用失败: {str(e)}"}
 
@@ -642,93 +661,200 @@ LOGIN_HTML = r"""<!DOCTYPE html>
             background: linear-gradient(135deg, #1565c0, #1976d2);
             min-height: 100vh; display: flex; align-items: center; justify-content: center;
         }
-        .login-card {
+        .card {
             background: white; border-radius: 16px; padding: 40px;
             width: 400px; max-width: 90vw;
             box-shadow: 0 20px 60px rgba(0,0,0,0.3);
         }
-        .login-card h1 { font-size: 24px; text-align: center; margin-bottom: 8px; color: #1565c0; }
-        .login-card .subtitle { text-align: center; color: #888; font-size: 13px; margin-bottom: 28px; }
-        .login-card .field { margin-bottom: 16px; }
-        .login-card .field label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
-        .login-card .field input {
+        .card h1 { font-size: 24px; text-align: center; margin-bottom: 4px; color: #1565c0; }
+        .card .subtitle { text-align: center; color: #888; font-size: 13px; margin-bottom: 28px; }
+        .card .field { margin-bottom: 16px; }
+        .card .field label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+        .card .field input {
             width: 100%; padding: 10px 14px; border: 1px solid #ddd;
             border-radius: 8px; font-size: 14px; outline: none;
             transition: border-color 0.2s;
         }
-        .login-card .field input:focus { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,0.15); }
-        .login-card .btn-row { display: flex; gap: 10px; margin-top: 8px; }
-        .login-card .btn {
-            flex: 1; padding: 11px; border: none; border-radius: 8px;
+        .card .field input:focus { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,0.15); }
+        .card .btn {
+            width: 100%; padding: 11px; border: none; border-radius: 8px;
             font-size: 15px; font-weight: 600; cursor: pointer;
-            transition: all 0.2s;
+            background: #1565c0; color: white; transition: 0.2s; margin-top: 4px;
         }
-        .login-card .btn-primary { background: #1565c0; color: white; }
-        .login-card .btn-primary:hover { background: #0d47a1; }
-        .login-card .btn-secondary { background: #f0f0f0; color: #333; }
-        .login-card .btn-secondary:hover { background: #e0e0e0; }
-        .login-card .error { color: #c62828; font-size: 13px; margin-top: 8px; text-align: center; }
-        .login-card .success { color: #2e7d32; font-size: 13px; margin-top: 8px; text-align: center; }
+        .card .btn:hover { background: #0d47a1; }
+        .card .link { text-align: center; margin-top: 16px; font-size: 13px; }
+        .card .link a { color: #1565c0; text-decoration: none; }
+        .card .link a:hover { text-decoration: underline; }
+        .card .error { color: #c62828; font-size: 13px; margin-top: 10px; text-align: center; display: none; }
     </style>
 </head>
 <body>
-    <div class="login-card">
+    <div class="card">
         <h1>📈 模拟比赛辅助工具</h1>
         <div class="subtitle">同花顺模拟炒股 · 技术分析 · 智能顾问</div>
 
-        <div id="login-form">
-            <div class="field"><label>用户名</label><input id="login-username" placeholder="输入用户名" autocomplete="username"></div>
-            <div class="field"><label>密码</label><input id="login-password" type="password" placeholder="输入密码" autocomplete="current-password"></div>
-            <div class="btn-row">
-                <button class="btn btn-primary" onclick="doLogin()">登录</button>
-                <button class="btn btn-secondary" onclick="doRegister()">注册</button>
-            </div>
-            <div id="login-error" class="error"></div>
-        </div>
+        <div class="field"><label>用户名</label><input id="login-username" placeholder="输入用户名" autocomplete="username"></div>
+        <div class="field"><label>密码</label><input id="login-password" type="password" placeholder="输入密码" autocomplete="current-password"></div>
+        <button class="btn" onclick="doLogin()">登 录</button>
+        <div class="error" id="login-error"></div>
+        <div class="link">还没有账号？<a href="/register">去注册 →</a></div>
     </div>
 
     <script>
         document.getElementById('login-username').focus();
-
         document.getElementById('login-password').addEventListener('keydown', function(e) {
             if (e.key === 'Enter') doLogin();
         });
-
         async function doLogin() {
-            const username = document.getElementById('login-username').value.trim();
-            const password = document.getElementById('login-password').value;
-            document.getElementById('login-error').textContent = '';
-            if (!username || !password) { document.getElementById('login-error').textContent = '请填写用户名和密码'; return; }
-
-            const resp = await fetch('/api/auth/login', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, password})
-            });
-            const data = await resp.json();
-            if (data.ok) { window.location.href = '/'; }
-            else { document.getElementById('login-error').textContent = data.error || '登录失败'; }
-        }
-
-        async function doRegister() {
-            const username = document.getElementById('login-username').value.trim();
-            const password = document.getElementById('login-password').value;
-            document.getElementById('login-error').textContent = '';
-            if (!username || !password) { document.getElementById('login-error').textContent = '请填写用户名和密码'; return; }
-            if (password.length < 4) { document.getElementById('login-error').textContent = '密码至少 4 个字符'; return; }
-
-            const resp = await fetch('/api/auth/register', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({username, password})
-            });
-            const data = await resp.json();
-            if (data.ok) { window.location.href = '/'; }
-            else { document.getElementById('login-error').textContent = data.error || '注册失败'; }
+            const u = document.getElementById('login-username').value.trim();
+            const p = document.getElementById('login-password').value;
+            const err = document.getElementById('login-error');
+            err.style.display = 'none';
+            if (!u || !p) { err.textContent = '请填写用户名和密码'; err.style.display = 'block'; return; }
+            const r = await fetch('/api/auth/login', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
+            const d = await r.json();
+            if (d.ok) { window.location.href = '/'; }
+            else { err.textContent = d.error || '登录失败'; err.style.display = 'block'; }
         }
     </script>
 </body>
 </html>
 """
 
+REGISTER_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>注册 - 模拟比赛辅助工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #1565c0, #1976d2);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        }
+        .card {
+            background: white; border-radius: 16px; padding: 40px;
+            width: 440px; max-width: 90vw;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        .card h1 { font-size: 24px; text-align: center; margin-bottom: 4px; color: #1565c0; }
+        .card .subtitle { text-align: center; color: #888; font-size: 13px; margin-bottom: 24px; }
+        .card .field { margin-bottom: 14px; }
+        .card .field label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+        .card .field input {
+            width: 100%; padding: 10px 14px; border: 1px solid #ddd;
+            border-radius: 8px; font-size: 14px; outline: none;
+            transition: border-color 0.2s;
+        }
+        .card .field input:focus { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,0.15); }
+        .card .btn {
+            width: 100%; padding: 11px; border: none; border-radius: 8px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+            background: #1565c0; color: white; transition: 0.2s; margin-top: 4px;
+        }
+        .card .btn:hover { background: #0d47a1; }
+        .card .btn:disabled { background: #999; cursor: not-allowed; }
+        .card .link { text-align: center; margin-top: 16px; font-size: 13px; }
+        .card .link a { color: #1565c0; text-decoration: none; }
+        .card .link a:hover { text-decoration: underline; }
+        .card .error { color: #c62828; font-size: 13px; margin-top: 10px; text-align: center; display: none; }
+        .card .success { color: #2e7d32; font-size: 13px; margin-top: 10px; text-align: center; display: none; }
+        .card .rules { font-size: 12px; color: #888; margin: 4px 0 12px; line-height: 1.7; padding: 10px; background: #f8f9ff; border-radius: 8px; }
+        .card .rules .ok { color: #2e7d32; }
+        .card .rules .no { color: #c62828; }
+        .card .captcha-row { display: flex; gap: 10px; align-items: center; }
+        .card .captcha-row input { flex: 1; }
+        .card .captcha-q { font-size: 16px; font-weight: 600; color: #1565c0; white-space: nowrap; }
+        .card .captcha-refresh { cursor: pointer; color: #1565c0; font-size: 20px; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>📈 注册新账号</h1>
+        <div class="subtitle">模拟比赛辅助工具</div>
+
+        <div class="field"><label>用户名</label><input id="reg-username" placeholder="2 个字符以上"></div>
+
+        <div class="field"><label>密码</label><input id="reg-password" type="password" placeholder="至少 10 位" oninput="checkPassword()"></div>
+        <div class="field"><label>确认密码</label><input id="reg-password2" type="password" placeholder="再次输入密码"></div>
+
+        <div class="rules" id="pw-rules">
+            <div id="rule-len">🔴 至少 10 位</div>
+            <div id="rule-upper">🔴 包含大写字母</div>
+            <div id="rule-lower">🔴 包含小写字母</div>
+            <div id="rule-digit">🔴 包含数字</div>
+            <div id="rule-special">🔴 包含特殊字符 (!@#$%^&amp;* 等)</div>
+        </div>
+
+        <div class="field">
+            <label>人机验证</label>
+            <div class="captcha-row">
+                <span class="captcha-q" id="captcha-q">加载中…</span>
+                <input id="reg-captcha" placeholder="计算结果" style="max-width:100px">
+                <span class="captcha-refresh" onclick="loadCaptcha()" title="换一题">🔄</span>
+            </div>
+        </div>
+
+        <button class="btn" id="reg-btn" onclick="doRegister()" disabled>注 册</button>
+        <div class="error" id="reg-error"></div>
+        <div class="success" id="reg-success"></div>
+        <div class="link">已有账号？<a href="/login">去登录 →</a></div>
+    </div>
+
+    <script>
+        document.getElementById('reg-username').focus();
+
+        async function loadCaptcha() {
+            const r = await fetch('/api/auth/captcha');
+            const d = await r.json();
+            document.getElementById('captcha-q').textContent = d.question;
+        }
+        loadCaptcha();
+
+        function checkPassword() {
+            const p = document.getElementById('reg-password').value;
+            const ok = {len: p.length >= 10, upper: /[A-Z]/.test(p), lower: /[a-z]/.test(p), digit: /[0-9]/.test(p), special: /[!@#$%^&*()_+\-=\[\]{}|;':",.\/<>?~`]/.test(p)};
+            const allOk = ok.len && ok.upper && ok.lower && ok.digit && ok.special;
+            document.getElementById('reg-btn').disabled = !allOk;
+            for (const [k, v] of Object.entries(ok)) {
+                const el = document.getElementById('rule-' + k);
+                if (el) el.innerHTML = (v ? '✅ ' : '🔴 ') + el.textContent.slice(2);
+            }
+        }
+
+        async function doRegister() {
+            const u = document.getElementById('reg-username').value.trim();
+            const p = document.getElementById('reg-password').value;
+            const p2 = document.getElementById('reg-password2').value;
+            const captcha = document.getElementById('reg-captcha').value.trim();
+            const err = document.getElementById('reg-error');
+            const suc = document.getElementById('reg-success');
+            err.style.display = 'none'; suc.style.display = 'none';
+
+            if (!u || u.length < 2) { err.textContent = '用户名至少 2 个字符'; err.style.display = 'block'; return; }
+            if (p !== p2) { err.textContent = '两次密码不一致'; err.style.display = 'block'; return; }
+            if (!captcha) { err.textContent = '请完成人机验证'; err.style.display = 'block'; return; }
+
+            document.getElementById('reg-btn').disabled = true;
+            document.getElementById('reg-btn').textContent = '注册中…';
+
+            const r = await fetch('/api/auth/register', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,captcha})});
+            const d = await r.json();
+            if (d.ok) { window.location.href = '/'; }
+            else {
+                err.textContent = d.error || '注册失败';
+                err.style.display = 'block';
+                document.getElementById('reg-btn').disabled = false;
+                document.getElementById('reg-btn').textContent = '注 册';
+                loadCaptcha();
+            }
+        }
+    </script>
+</body>
+</html>
+"""
 
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1063,6 +1189,28 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- 卖出弹窗 -->
+    <div id="sell-dialog" class="dialog-overlay" style="display:none" onclick="document.getElementById('sell-dialog').style.display='none'">
+        <div class="dialog" style="min-width:380px" onclick="event.stopPropagation()">
+            <h3 id="sell-title">❌ 卖出</h3>
+            <div class="field">
+                <label>当前市价</label>
+                <div id="sell-market-price" style="font-size:18px;font-weight:700;color:#1565c0">—</div>
+            </div>
+            <div class="field"><label>卖出价格</label><input id="sell-price" type="number" step="0.01" placeholder="输入卖出价"></div>
+            <div class="field"><label>卖出数量（股）</label><input id="sell-shares" type="number" placeholder="全部"></div>
+            <div style="font-size:12px;color:#888;margin-bottom:12px">
+                持仓: <span id="sell-hold-shares">0</span> 股 · 
+                成本: <span id="sell-cost">0.00</span>
+            </div>
+            <div class="btn-row">
+                <button class="btn" onclick="document.getElementById('sell-dialog').style.display='none'">取消</button>
+                <button class="btn btn-danger" onclick="confirmSell()" style="background:#c62828;color:white">确认卖出</button>
+            </div>
+            <div id="sell-error" style="color:#c62828;font-size:13px;margin-top:8px"></div>
+        </div>
+    </div>
+
     <div class="status-bar">
         <span id="statusBar">就绪</span>
         <span style="float:right" id="timeDisplay"></span>
@@ -1177,8 +1325,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
             const headers = ['代码','名称','评分','推荐','RSI','信号','止损'];
             const rows = data.map(s => [s.symbol, s.name, s.score, s.recommendation,
                 s.rsi, (s.reason||[]).join('; '), s.stop_reason]);
-            const csv = [headers.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\\n');
-            const blob = new Blob(['\\ufeff' + csv], {type: 'text/csv;charset=utf-8-sig'});
+            const csv = [headers.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\n');
+            const blob = new Blob(['\ufeff' + csv], {type: 'text/csv;charset=utf-8-sig'});
             const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
             a.download = '推荐股票_' + new Date().toISOString().slice(0,10) + '.csv';
             a.click();
@@ -1208,7 +1356,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                             <td>${h.market_value.toLocaleString()}</td>
                             <td class="${pnlCls}">${h.pnl >= 0 ? '+' : ''}${h.pnl.toFixed(2)} (${h.pnl_pct >= 0 ? '+' : ''}${h.pnl_pct.toFixed(1)}%)</td>
                             <td>
-                                <button class="btn btn-sm btn-danger" onclick="sellHolding('${h.symbol}','${h.name}',${h.shares},${h.cost})">卖出</button>
+                                <button class="btn btn-sm btn-danger" onclick="openSellDialog('${h.symbol}','${h.name}',${h.shares},${h.cost},${h.price})">卖出</button>
                             </td>
                         </tr>`;
                     }).join('');
@@ -1254,29 +1402,45 @@ INDEX_HTML = r"""<!DOCTYPE html>
             document.getElementById('dialog-overlay').style.display = 'flex';
         }
 
-        function showSellDialog(symbol, name, shares, cost) {
-            document.getElementById('dlg-symbol').value = symbol;
-            document.getElementById('dlg-name').value = name;
-            document.getElementById('dlg-shares').value = shares;
-            document.getElementById('dlg-cost').value = cost;
-            document.getElementById('dialog-title').textContent = '❌ 卖出 ' + name;
-            document.getElementById('dialog-confirm').textContent = '确认卖出';
-            document.getElementById('dialog-overlay').style.display = 'flex';
-            window._sellData = {symbol, shares, cost};
+        // ── 卖出弹窗 ─────────────────────────────────────
+        let _sellData = {symbol:'', name:'', shares:0, cost:0, price:0};
+
+        function openSellDialog(symbol, name, shares, cost, price) {
+            _sellData = {symbol, name, shares, cost, price};
+            document.getElementById('sell-title').textContent = '❌ 卖出 ' + name + ' (' + symbol + ')';
+            document.getElementById('sell-market-price').textContent = '¥' + price.toFixed(2);
+            document.getElementById('sell-price').value = price.toFixed(2);
+            document.getElementById('sell-shares').value = shares;
+            document.getElementById('sell-hold-shares').textContent = shares;
+            document.getElementById('sell-cost').textContent = cost.toFixed(2);
+            document.getElementById('sell-error').textContent = '';
+            document.getElementById('sell-dialog').style.display = 'flex';
         }
 
-        let _sellData = null;
+        async function confirmSell() {
+            const price = parseFloat(document.getElementById('sell-price').value);
+            const shares = parseInt(document.getElementById('sell-shares').value);
+            const err = document.getElementById('sell-error');
+            
+            if (!price || price <= 0) { err.textContent = '请输入有效价格'; return; }
+            if (!shares || shares <= 0) { err.textContent = '请输入有效数量'; return; }
+            if (shares > _sellData.shares) { err.textContent = '卖出数量不能超过持仓 ' + _sellData.shares + ' 股'; return; }
 
-        function sellHolding(symbol, name, shares, cost) {
-            if (!confirm(`确认卖出 ${name}(${symbol}) ${shares}股？\n成本 ${cost.toFixed(2)}`)) return;
-            fetch('/api/holdings/remove', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({symbol, shares: shares, price: 0})
-            }).then(r => r.json()).then(d => {
-                loadHoldings();
+            document.getElementById('sell-dialog').style.display = 'none';
+            setStatus('正在卖出…');
+
+            try {
+                const resp = await fetch('/api/holdings/remove', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({symbol: _sellData.symbol, shares: shares, price: price})
+                });
+                const d = await resp.json();
                 setStatus(d.message || '卖出成功');
-            }).catch(e => setStatus('卖出失败: ' + e.message));
+                loadHoldings();
+            } catch(e) {
+                setStatus('卖出失败: ' + e.message);
+            }
         }
 
         function closeDialog(e) {

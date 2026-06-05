@@ -5,6 +5,36 @@ import json
 import os
 import datetime
 import hashlib
+import random
+import string
+
+
+def validate_password(password: str) -> tuple:
+    """校验密码强度，返回 (是否通过, 错误信息)"""
+    if len(password) < 10:
+        return False, "密码至少 10 位"
+    if not any(c.isupper() for c in password):
+        return False, "密码需要包含大写字母"
+    if not any(c.islower() for c in password):
+        return False, "密码需要包含小写字母"
+    if not any(c.isdigit() for c in password):
+        return False, "密码需要包含数字"
+    specials = "!@#$%^&*()_+-=[]{}|;':,./<>?~`"
+    if not any(c in specials for c in password):
+        return False, "密码需要包含特殊字符"
+    return True, ""
+
+
+def generate_captcha() -> tuple:
+    """生成人机验证题目，返回 (题目文本, 答案字符串)"""
+    a = random.randint(1, 20)
+    b = random.randint(1, 20)
+    op = random.choice(["+", "-"])
+    if op == "-" and a < b:
+        a, b = b, a
+    q = f"{a} {op} {b} = ?"
+    ans = str(a + b if op == "+" else a - b)
+    return q, ans
 
 
 def get_base_dir():
@@ -41,8 +71,10 @@ def register_user(username: str, password: str) -> str:
     username = username.strip()
     if not username or len(username) < 2:
         return "用户名至少 2 个字符"
-    if not password or len(password) < 4:
-        return "密码至少 4 个字符"
+    
+    ok, err = validate_password(password)
+    if not ok:
+        return err
 
     users = _load_users()
     if username in users:

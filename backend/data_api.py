@@ -14,9 +14,15 @@ import json
 
 
 def _to_native(v):
-    """将 numpy 类型转为 Python 原生类型"""
+    """将 numpy 类型和 NaN 转为 Python 原生类型"""
     if isinstance(v, (pd.Series, pd.DataFrame)):
         return v.to_dict() if isinstance(v, pd.Series) else v.to_dict(orient='records')
+    # 处理 NaN / inf
+    try:
+        if isinstance(v, float) and (v != v or v == float('inf') or v == float('-inf')):
+            return None
+    except:
+        pass
     if hasattr(v, 'dtype'):
         if hasattr(v, 'item'):
             return v.item()
