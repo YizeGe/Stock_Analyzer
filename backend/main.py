@@ -231,6 +231,15 @@ async def api_batch_quote(symbols: str):
     return fetch_batch_quotes(sym_list)
 
 
+# ── 股票搜索 ────────────────────────────────────────────
+
+@app.get("/api/search")
+async def api_search(q: str = ""):
+    from data_api import search_stocks
+    results = search_stocks(q, limit=10)
+    return {"results": results, "query": q}
+
+
 # ── 单股分析 ────────────────────────────────────────────
 
 @app.get("/api/analyze/{symbol}")
@@ -960,7 +969,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         .status-bar {
             background: #333; color: #ccc; padding: 6px 16px;
             font-size: 12px; font-family: monospace; position: fixed; bottom: 0;
-            left: 0; right: 0; z-index: 100;
+            left: 0; right: 0; z-index: 100; display: flex; justify-content: space-between;
         }
 
         .dialog-overlay {
@@ -1037,9 +1046,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
     <div class="app-header">
-        <div>
-            <h1>📈 模拟比赛辅助工具</h1>
-            <div class="subtitle">同花顺模拟炒股 | 技术分析 · 智能顾问</div>
+        <div style="display:flex;align-items:center;gap:20px">
+            <div>
+                <h1>📈 模拟比赛辅助工具</h1>
+                <div class="subtitle">同花顺模拟炒股 | 技术分析 · 智能顾问</div>
+            </div>
+            <div class="search-box" style="position:relative">
+                <input id="search-input" type="text" placeholder="搜股票代码/名称…"
+                       oninput="searchStocks(this.value)" onkeydown="if(event.key==='Enter')doSearch(this.value)"
+                       style="padding:6px 12px;border:none;border-radius:6px;width:220px;font-size:13px;outline:none">
+                <div id="search-results" class="search-dropdown" style="display:none"></div>
+            </div>
         </div>
         <div style="display:flex;align-items:center;gap:12px">
             <span id="statusText" style="font-size:12px;opacity:0.8">就绪</span>
@@ -1212,8 +1229,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
     </div>
 
     <div class="status-bar">
-        <span id="statusBar">就绪</span>
-        <span style="float:right" id="timeDisplay"></span>
+        <span><span id="statusBar">就绪</span> <span id="statusExtra" style="color:#888"></span></span>
+        <span>
+            <span id="marketTimeStatus" style="margin-right:12px"></span>
+            <span id="timeDisplay"></span>
+        </span>
     </div>
 
     <script>
@@ -1227,8 +1247,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
         }
 
         // ── 状态栏 ────────────────────────────────────────
-        function setStatus(msg) {
-            document.getElementById('statusBar').textContent = msg;
+        function setStatus(msg, extra) {
+            const sb = document.getElementById('statusBar');
+            sb.textContent = msg;
+            const se = document.getElementById('statusExtra');
+            if (extra) se.textContent = ' | ' + extra; else se.textContent = '';
         }
 
         // ── 市场概览 ──────────────────────────────────────
@@ -1748,6 +1771,62 @@ INDEX_HTML = r"""<!DOCTYPE html>
             document.getElementById('timeDisplay').textContent = now.toLocaleString('zh-CN');
         }
 
+        // ── 股票搜索 ──────────────────────────────────────
+        let _searchTimer = null;
+
+        async function searchStocks(q) {
+            const dropdown = document.getElementById('search-results');
+            if (q.length < 1) { dropdown.style.display = 'none'; return; }
+
+            clearTimeout(_searchTimer);
+            _searchTimer = setTimeout(async () => {
+                dropdown.innerHTML = '<div class="loading-item">搜索中…</div>';
+                dropdown.style.display = 'block';
+
+                try {
+                    const resp = await fetch('/api/search?q=' + encodeURIComponent(q));
+                    const data = await resp.json();
+                    const items = data.results || [];
+
+                    if (items.length === 0) {
+                        dropdown.innerHTML = '<div class="loading-item">未找到匹配股票</div>';
+                        return;
+                    }
+
+                    dropdown.innerHTML = items.map(s =>
+                        `<div class="item" onclick="selectSearch('${s.symbol}','${s.name}')">
+                            <span class="sym">${s.symbol}</span>
+                            <span class="nm">${s.name}</span>
+                            <span class="pr ${(s.change||0)>=0?'up':'down'}">${(s.price||0).toFixed(2)}</span>
+                            <span class="ch ${(s.change||0)>=0?'up':'down'}">${(s.change||0)>=0?'+':''}${(s.change||0).toFixed(2)}%</span>
+                        </div>`
+                    ).join('');
+                } catch(e) {
+                    dropdown.innerHTML = '<div class="loading-item">搜索失败</div>';
+                }
+            }, 200);
+        }
+
+        function doSearch(q) {
+            if (!q) q = document.getElementById('search-input').value;
+            if (q.length < 3 && !/^\d{6}$/.test(q)) return;
+            // 直接搜索
+            searchStocks(q);
+        }
+
+        function selectSearch(symbol, name) {
+            document.getElementById('search-results').style.display = 'none';
+            document.getElementById('search-input').value = name || symbol;
+            showStockDetail(symbol, name || symbol);
+        }
+
+        // 点击页面其他地方关闭搜索下拉
+        document.addEventListener('click', function(e) {
+            if (!e.target.closest('.search-box')) {
+                document.getElementById('search-results').style.display = 'none';
+            }
+        });
+
         // ── 自动刷新（交易时段每分钟刷新） ────────────────
         function startAutoRefresh() {
             checkMarketOpen();
@@ -1773,14 +1852,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
             if (isOpen) {
                 autoRefresh();
                 document.getElementById('statusText').textContent = '🟢 交易中·自动刷新';
+                document.getElementById('marketTimeStatus').textContent = '🟢 交易中';
             } else if (day >= 1 && day <= 5 && minutes >= 570 && minutes < 780) {
                 document.getElementById('statusText').textContent = '🟡 午休中·暂停刷新';
+                document.getElementById('marketTimeStatus').textContent = '🟡 午休';
             } else if (day >= 1 && day <= 5 && minutes >= 900) {
                 document.getElementById('statusText').textContent = '🔴 已收盘';
+                document.getElementById('marketTimeStatus').textContent = '🔴 已收盘';
             } else if (day === 6 || day === 0) {
                 document.getElementById('statusText').textContent = '🟤 周末休市';
+                document.getElementById('marketTimeStatus').textContent = '🟤 休市';
             } else {
                 document.getElementById('statusText').textContent = '⚪ 盘前';
+                document.getElementById('marketTimeStatus').textContent = '⚪ 盘前';
             }
         }
 

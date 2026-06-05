@@ -656,3 +656,95 @@ def get_recommended_stocks(symbols, market_above_ma20=None, max_count=20,
     analyzed.sort(key=lambda x: x["score"], reverse=True)
     watch_pool.sort(key=lambda x: x["score"], reverse=True)
     return analyzed[:max_count], zt_pool, watch_pool
+
+
+# ── 股票搜索 ─────────────────────────────────────────────
+
+STOCK_NAME_CACHE = None
+
+
+def search_stocks(query: str, limit: int = 10) -> list:
+    """按代码或名称搜索股票，返回 [{symbol, name, ...}]"""
+    global STOCK_NAME_CACHE
+    q = query.strip().lower()
+    if not q:
+        return []
+
+    results = []
+    seen = set()
+
+    # 如果输入是 6 位代码，直接查
+    if q.isdigit() and len(q) <= 6:
+        code = q.zfill(6)
+        quote = fetch_realtime_quote(code)
+        if quote and quote.get("name"):
+            return [{"symbol": code, "name": quote["name"],
+                     "price": quote.get("price", 0), "change": quote.get("change", 0)}]
+        # 如果查不到，可能是 sh/sz 前缀问题，再试一次
+        for prefix in ["sh", "sz"]:
+            quote = fetch_realtime_quote(f"{prefix}{code}")
+            if quote and quote.get("name"):
+                return [{"symbol": code, "name": quote["name"],
+                         "price": quote.get("price", 0), "change": quote.get("change", 0)}]
+        return []
+
+    # 如果是文字搜索，用已知热门股票匹配（本地缓存）
+    if STOCK_NAME_CACHE is None:
+        # 构建一个常见股票列表
+        STOCK_NAME_CACHE = _build_common_stock_list()
+
+    for s in STOCK_NAME_CACHE:
+        if s["symbol"] in seen:
+            continue
+        if q in s["name"] or s["symbol"].startswith(q):
+            results.append(s)
+            seen.add(s["symbol"])
+        if len(results) >= limit:
+            break
+
+    # 没搜到的话试着当代码搜
+    if not results and len(q) <= 6:
+        code = q.zfill(6)
+        quote = fetch_realtime_quote(code)
+        if quote and quote.get("name"):
+            return [{"symbol": code, "name": quote["name"],
+                     "price": quote.get("price", 0), "change": quote.get("change", 0)}]
+
+    return results
+
+
+def _build_common_stock_list():
+    """构建常用股票列表（不用 akshare，避免网络封锁）"""
+    COMMON_SYMBOLS = [
+        ("000001", "平安银行"), ("000002", "万科A"), ("000063", "中兴通讯"),
+        ("000100", "TCL科技"), ("000333", "美的集团"), ("000568", "泸州老窖"),
+        ("000651", "格力电器"), ("000725", "京东方A"), ("000858", "五粮液"),
+        ("000977", "浪潮信息"), ("002007", "华兰生物"), ("002230", "科大讯飞"),
+        ("002415", "海康威视"), ("002475", "立讯精密"), ("002491", "通鼎互联"),
+        ("002594", "比亚迪"), ("300015", "爱尔眼科"), ("300024", "机器人"),
+        ("300059", "东方财富"), ("300133", "华策影视"), ("300750", "宁德时代"),
+        ("300760", "迈瑞医疗"), ("300897", "山科智能"),
+        ("600000", "浦发银行"), ("600011", "华能国际"), ("600016", "民生银行"),
+        ("600019", "宝钢股份"), ("600028", "中国石化"), ("600036", "招商银行"),
+        ("600054", "黄山旅游"), ("600104", "上汽集团"), ("600111", "北方稀土"),
+        ("600115", "中国东航"), ("600150", "中国船舶"), ("600188", "兖矿能源"),
+        ("600233", "圆通速递"), ("600259", "广晟有色"), ("600276", "恒瑞医药"),
+        ("600309", "万华化学"), ("600418", "江淮汽车"), ("600487", "亨通光电"),
+        ("600519", "贵州茅台"), ("600536", "中国软件"), ("600557", "康缘药业"),
+        ("600570", "恒生电子"), ("600584", "长电科技"), ("600585", "海螺水泥"),
+        ("600598", "北大荒"), ("600688", "上海石化"), ("600690", "海尔智家"),
+        ("600703", "三安光电"), ("600741", "华域汽车"), ("600745", "闻泰科技"),
+        ("600801", "华新水泥"), ("600837", "海通证券"), ("600859", "王府井"),
+        ("600862", "中航高科"), ("600887", "伊利股份"), ("600893", "航发动力"),
+        ("600900", "长江电力"), ("600903", "贵州燃气"),
+        ("601012", "隆基绿能"), ("601018", "宁波港"), ("601100", "恒立液压"),
+        ("601138", "工业富联"), ("601166", "兴业银行"), ("601179", "中国西电"),
+        ("601211", "国泰君安"), ("601318", "中国平安"), ("601330", "绿色动力"),
+        ("601398", "工商银行"), ("601615", "明阳智能"), ("601668", "中国建筑"),
+        ("601728", "中国电信"), ("601888", "中国中免"), ("601899", "紫金矿业"),
+        ("601919", "中远海控"), ("601985", "中国核电"), ("601998", "中信银行"),
+        ("603007", "花王股份"), ("603259", "药明康德"), ("603288", "海天味业"),
+        ("603444", "吉比特"), ("603501", "韦尔股份"),
+        ("688256", "寒武纪"), ("688981", "中芯国际"),
+    ]
+    return [{"symbol": s[0], "name": s[1], "price": 0, "change": 0} for s in COMMON_SYMBOLS]
