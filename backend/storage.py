@@ -1,23 +1,102 @@
 """
-本地 JSON 文件存储 — 管理持仓、交易流水、AI 对话
+本地 JSON 文件存储 — 管理用户、持仓、交易流水、AI 对话
 """
 import json
 import os
 import datetime
+import hashlib
 
 
-def get_data_dir():
-    """获取 userdata 目录路径（项目根目录下的 userdata/）"""
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    d = os.path.join(base, "userdata")
+def get_base_dir():
+    """项目根目录"""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# ════════════════════════════════════════════════════════════
+# 用户管理
+# ════════════════════════════════════════════════════════════
+
+USERS_FILE = os.path.join(get_base_dir(), "users.json")
+
+
+def _load_users():
+    try:
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_users(users):
+    with open(USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+
+def _hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+
+def register_user(username: str, password: str) -> str:
+    """注册用户，成功返回 None，失败返回错误信息"""
+    username = username.strip()
+    if not username or len(username) < 2:
+        return "用户名至少 2 个字符"
+    if not password or len(password) < 4:
+        return "密码至少 4 个字符"
+
+    users = _load_users()
+    if username in users:
+        return "用户名已存在"
+
+    users[username] = {
+        "password": _hash_password(password),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    _save_users(users)
+
+    # 创建用户数据目录
+    user_dir = os.path.join(get_base_dir(), "userdata", username)
+    os.makedirs(user_dir, exist_ok=True)
+
+    # 初始化用户数据文件
+    for fname in ("config.json", "my_holdings.json", "trade_history.json", "ai_history.json"):
+        path = os.path.join(user_dir, fname)
+        if not os.path.exists(path):
+            if fname == "config.json":
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"api_key": "", "total_cash": 1000000.0}, f)
+            else:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump([] if fname != "config.json" else {}, f)
+
+    return None  # 成功
+
+
+def verify_user(username: str, password: str) -> bool:
+    """验证用户登录"""
+    users = _load_users()
+    user = users.get(username)
+    if not user:
+        return False
+    return user["password"] == _hash_password(password)
+
+
+# ════════════════════════════════════════════════════════════
+# 用户数据路径
+# ════════════════════════════════════════════════════════════
+
+def get_user_dir(username: str) -> str:
+    d = os.path.join(get_base_dir(), "userdata", username)
     os.makedirs(d, exist_ok=True)
     return d
 
 
-# ── 配置 ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# 配置
+# ════════════════════════════════════════════════════════════
 
-def load_config():
-    path = os.path.join(get_data_dir(), "config.json")
+def load_config(username: str = "default"):
+    path = os.path.join(get_user_dir(username), "config.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -25,8 +104,8 @@ def load_config():
         return {"api_key": "", "total_cash": 1000000.0}
 
 
-def save_config(cfg):
-    path = os.path.join(get_data_dir(), "config.json")
+def save_config(cfg, username: str = "default"):
+    path = os.path.join(get_user_dir(username), "config.json")
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
@@ -36,10 +115,12 @@ def save_config(cfg):
         return False
 
 
-# ── 持仓 ─────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# 持仓
+# ════════════════════════════════════════════════════════════
 
-def load_holdings():
-    path = os.path.join(get_data_dir(), "my_holdings.json")
+def load_holdings(username: str = "default"):
+    path = os.path.join(get_user_dir(username), "my_holdings.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -47,8 +128,8 @@ def load_holdings():
         return []
 
 
-def save_holdings(holdings):
-    path = os.path.join(get_data_dir(), "my_holdings.json")
+def save_holdings(holdings, username: str = "default"):
+    path = os.path.join(get_user_dir(username), "my_holdings.json")
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(holdings, f, ensure_ascii=False, indent=2)
@@ -58,10 +139,12 @@ def save_holdings(holdings):
         return False
 
 
-# ── 交易流水 ─────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# 交易流水
+# ════════════════════════════════════════════════════════════
 
-def load_trade_history():
-    path = os.path.join(get_data_dir(), "trade_history.json")
+def load_trade_history(username: str = "default"):
+    path = os.path.join(get_user_dir(username), "trade_history.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -69,8 +152,8 @@ def load_trade_history():
         return []
 
 
-def save_trade_history(history):
-    path = os.path.join(get_data_dir(), "trade_history.json")
+def save_trade_history(history, username: str = "default"):
+    path = os.path.join(get_user_dir(username), "trade_history.json")
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(history, f, ensure_ascii=False, indent=2)
@@ -80,9 +163,9 @@ def save_trade_history(history):
         return False
 
 
-def record_trade(action, symbol, name, price, shares, cost_price=0.0, avail_cash=0.0):
+def record_trade(action, symbol, name, price, shares, cost_price=0.0, avail_cash=0.0, username: str = "default"):
     """记录一笔买卖流水"""
-    history = load_trade_history()
+    history = load_trade_history(username)
     amount = price * shares
     pnl = 0.0
     if action == "SELL":
@@ -99,14 +182,16 @@ def record_trade(action, symbol, name, price, shares, cost_price=0.0, avail_cash
         "pnl": round(pnl, 2),
     }
     history.insert(0, record)
-    save_trade_history(history)
+    save_trade_history(history, username)
     return record
 
 
-# ── AI 对话历史 ─────────────────────────────────────────
+# ════════════════════════════════════════════════════════════
+# AI 对话历史
+# ════════════════════════════════════════════════════════════
 
-def load_ai_history():
-    path = os.path.join(get_data_dir(), "ai_history.json")
+def load_ai_history(username: str = "default"):
+    path = os.path.join(get_user_dir(username), "ai_history.json")
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -114,10 +199,9 @@ def load_ai_history():
         return []
 
 
-def save_ai_history(messages):
-    path = os.path.join(get_data_dir(), "ai_history.json")
+def save_ai_history(messages, username: str = "default"):
+    path = os.path.join(get_user_dir(username), "ai_history.json")
     try:
-        # 保留最近 30 条
         with open(path, "w", encoding="utf-8") as f:
             json.dump(messages[-30:], f, ensure_ascii=False, indent=2)
         return True

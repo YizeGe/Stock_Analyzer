@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.middleware.sessions import SessionMiddleware
 import uvicorn
 
 from data_api import (
@@ -82,6 +83,79 @@ from starlette.staticfiles import StaticFiles
 frontend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 os.makedirs(frontend_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+
+# Session 中间件（用于登录状态）
+app.add_middleware(SessionMiddleware, secret_key="stock-analyzer-secret-key-2026")
+
+
+# ── 辅助函数 ────────────────────────────────────────────
+
+def get_current_user(request: Request) -> str | None:
+    """从 session 获取当前用户名"""
+    return request.session.get("user")
+
+
+def login_required(request: Request):
+    """检查是否已登录，未登录则返回 None"""
+    user = get_current_user(request)
+    if not user:
+        return None
+    return user
+
+
+# ════════════════════════════════════════════════════════════
+# 用户认证路由
+# ════════════════════════════════════════════════════════════
+
+@app.get("/login")
+async def login_page(request: Request):
+    """登录页面"""
+    if get_current_user(request):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/")
+    return HTMLResponse(content=LOGIN_HTML)
+
+
+@app.post("/api/auth/login")
+async def api_login(request: Request):
+    data = await request.json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+
+    from storage import verify_user
+    if verify_user(username, password):
+        request.session["user"] = username
+        return {"ok": True, "username": username}
+    return {"ok": False, "error": "用户名或密码错误"}
+
+
+@app.post("/api/auth/register")
+async def api_register(request: Request):
+    data = await request.json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+
+    from storage import register_user
+    err = register_user(username, password)
+    if err:
+        return {"ok": False, "error": err}
+    # 注册后自动登录
+    request.session["user"] = username
+    return {"ok": True, "username": username}
+
+
+@app.post("/api/auth/logout")
+async def api_logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request):
+    user = get_current_user(request)
+    if user:
+        return {"logged_in": True, "username": user}
+    return {"logged_in": False}
 
 
 # ════════════════════════════════════════════════════════════
@@ -178,8 +252,11 @@ async def api_recommend():
 # ── 配置 ────────────────────────────────────────────────
 
 @app.get("/api/config")
-async def api_get_config():
-    cfg = load_config()
+async def api_get_config(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    cfg = load_config(username=user)
     # 隐藏完整 API Key
     safe = cfg.copy()
     if safe.get("api_key"):
@@ -190,23 +267,29 @@ async def api_get_config():
 
 @app.post("/api/config")
 async def api_save_config(req: Request):
+    user = get_current_user(req)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
     data = await req.json()
-    cfg = load_config()
+    cfg = load_config(username=user)
     if "api_key" in data:
         cfg["api_key"] = data["api_key"]
     if "total_cash" in data:
         cfg["total_cash"] = float(data["total_cash"])
     if "avail_cash" in data:
         cfg["avail_cash"] = float(data["avail_cash"])
-    save_config(cfg)
+    save_config(cfg, username=user)
     return {"ok": True}
 
 
 # ── 持仓 ────────────────────────────────────────────────
 
 @app.get("/api/holdings")
-async def api_get_holdings():
-    holdings = load_holdings()
+async def api_get_holdings(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    holdings = load_holdings(username=user)
     # 拉实时行情
     symbols = [h["symbol"] for h in holdings if h.get("symbol")]
     quotes = {}
@@ -239,7 +322,7 @@ async def api_get_holdings():
             "pnl_pct": round(pnl_pct, 2),
         })
 
-    cfg = load_config()
+    cfg = load_config(username=user)
     return {
         "holdings": result,
         "avail_cash": cfg.get("avail_cash", cfg.get("total_cash", 1000000.0)),
@@ -249,6 +332,9 @@ async def api_get_holdings():
 
 @app.post("/api/holdings/add")
 async def api_add_holding(req: Request):
+    user = get_current_user(req)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
     data = await req.json()
     symbol = data.get("symbol", "").strip()
     name = data.get("name", symbol).strip()
@@ -257,7 +343,7 @@ async def api_add_holding(req: Request):
     if not symbol or shares <= 0 or cost <= 0:
         raise HTTPException(400, "缺少必要的参数")
 
-    holdings = load_holdings()
+    holdings = load_holdings(username=user)
     found = False
     for h in holdings:
         if h["symbol"] == symbol:
@@ -271,22 +357,24 @@ async def api_add_holding(req: Request):
     if not found:
         holdings.append({"symbol": symbol, "name": name, "shares": shares, "cost": cost})
 
-    save_holdings(holdings)
+    save_holdings(holdings, username=user)
 
-    cfg = load_config()
+    cfg = load_config(username=user)
     cfg["avail_cash"] = cfg.get("avail_cash", cfg.get("total_cash", 1000000.0)) - cost * shares
-    save_config(cfg)
-    record_trade("BUY", symbol, name, cost, shares, cost, cfg.get("avail_cash", 0))
+    save_config(cfg, username=user)
+    record_trade("BUY", symbol, name, cost, shares, cost, cfg.get("avail_cash", 0), username=user)
 
     return {"ok": True}
 
 
 @app.post("/api/holdings/update")
 async def api_update_holding(req: Request):
-    """修改单条持仓（成本/数量）"""
+    user = get_current_user(req)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
     data = await req.json()
     symbol = data.get("symbol", "").strip()
-    holdings = load_holdings()
+    holdings = load_holdings(username=user)
     for h in holdings:
         if h["symbol"] == symbol:
             if "shares" in data:
@@ -296,12 +384,15 @@ async def api_update_holding(req: Request):
             if "name" in data and data["name"]:
                 h["name"] = data["name"].strip()
             break
-    save_holdings(holdings)
+    save_holdings(holdings, username=user)
     return {"ok": True}
 
 
 @app.post("/api/holdings/remove")
 async def api_remove_holding(req: Request):
+    user = get_current_user(req)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
     """删除 / 清仓某持仓"""
     data = await req.json()
     symbol = data.get("symbol", "").strip()
@@ -345,15 +436,21 @@ async def api_remove_holding(req: Request):
 # ── 交易流水 ────────────────────────────────────────────
 
 @app.get("/api/trades")
-async def api_get_trades():
-    return load_trade_history()
+async def api_get_trades(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return load_trade_history(username=user)
 
 
 # ── AI 顾问 ─────────────────────────────────────────────
 
 @app.get("/api/ai/history")
-async def api_ai_history():
-    return load_ai_history()
+async def api_ai_history(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    return load_ai_history(username=user)
 
 
 @app.post("/api/ai/chat")
@@ -363,10 +460,14 @@ async def api_ai_chat(req: Request):
     if not msg:
         raise HTTPException(400, "消息不能为空")
 
-    cfg = load_config()
+    user = get_current_user(req)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+
+    cfg = load_config(username=user)
     api_key = cfg.get("api_key", "")
     avail_cash = cfg.get("avail_cash", cfg.get("total_cash", 1000000.0))
-    holdings = load_holdings()
+    holdings = load_holdings(username=user)
 
     from data_api import get_market_status
 
@@ -375,7 +476,7 @@ async def api_ai_chat(req: Request):
     mkt_desc = f"大盘MA20状态: {'多头' if mkt and mkt.get('above_ma20') else '空头'}" if mkt else "大盘数据暂缺"
     # 不在这里做全量分析，用已有数据即可
 
-    ai_history = load_ai_history()
+    ai_history = load_ai_history(username=user)
 
     system_prompt = f'''你是一个模拟炒股交易员与智能记账助手。你非常善于理解用户的自然语言指令。
 
@@ -457,7 +558,7 @@ async def api_ai_chat(req: Request):
     if reply:
         ai_history.append({"role": "user", "content": msg})
         ai_history.append({"role": "assistant", "content": reply})
-        save_ai_history(ai_history)
+        save_ai_history(ai_history, username=user)
 
     # 处理操作
     operations = result.get("operations", [])
@@ -472,7 +573,7 @@ async def api_ai_chat(req: Request):
         if not sym or not action or sh <= 0 or pr <= 0:
             continue
 
-        h_list = load_holdings()
+        h_list = load_holdings(username=user)
         if action == "BUY":
             found = False
             for h in h_list:
@@ -484,10 +585,10 @@ async def api_ai_chat(req: Request):
                     break
             if not found:
                 h_list.append({"symbol": sym, "name": op_name, "shares": sh, "cost": pr})
-            save_holdings(h_list)
+            save_holdings(h_list, username=user)
             cfg["avail_cash"] = cfg.get("avail_cash", cfg.get("total_cash", 1000000.0)) - pr * sh
-            save_config(cfg)
-            record_trade("BUY", sym, op_name, pr, sh, pr, cfg.get("avail_cash", 0))
+            save_config(cfg, username=user)
+            record_trade("BUY", sym, op_name, pr, sh, pr, cfg.get("avail_cash", 0), username=user)
             trade_results.append(f"✅ 买入 {op_name}({sym}) {int(sh)}股 @ {pr}")
 
         elif action == "SELL":
@@ -503,11 +604,11 @@ async def api_ai_chat(req: Request):
                         new_hl.append(h)
                         trade_results.append(f"✅ 减仓 {op_name}({sym}) {int(actual_sh)}股")
                     cfg["avail_cash"] = cfg.get("avail_cash", cfg.get("total_cash", 1000000.0)) + pr * actual_sh
-                    save_config(cfg)
-                    record_trade("SELL", sym, op_name, pr, actual_sh, cost_p, cfg.get("avail_cash", 0))
+                    save_config(cfg, username=user)
+                    record_trade("SELL", sym, op_name, pr, actual_sh, cost_p, cfg.get("avail_cash", 0), username=user)
                 else:
                     new_hl.append(h)
-            save_holdings(new_hl)
+            save_holdings(new_hl, username=user)
 
     result["trade_results"] = trade_results
     return result
@@ -515,12 +616,120 @@ async def api_ai_chat(req: Request):
 
 # ── HTMX 前端页面 ───────────────────────────────────────
 
-@app.get("/", response_class=HTMLResponse)
-async def index():
+@app.get("/")
+async def index(request: Request):
+    """首页（需要登录）"""
+    user = get_current_user(request)
+    if not user:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url="/login")
     return HTMLResponse(content=INDEX_HTML)
 
 
 # 内联 HTML（单文件前端）
+
+
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - 模拟比赛辅助工具</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: linear-gradient(135deg, #1565c0, #1976d2);
+            min-height: 100vh; display: flex; align-items: center; justify-content: center;
+        }
+        .login-card {
+            background: white; border-radius: 16px; padding: 40px;
+            width: 400px; max-width: 90vw;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        .login-card h1 { font-size: 24px; text-align: center; margin-bottom: 8px; color: #1565c0; }
+        .login-card .subtitle { text-align: center; color: #888; font-size: 13px; margin-bottom: 28px; }
+        .login-card .field { margin-bottom: 16px; }
+        .login-card .field label { display: block; font-size: 13px; color: #666; margin-bottom: 4px; }
+        .login-card .field input {
+            width: 100%; padding: 10px 14px; border: 1px solid #ddd;
+            border-radius: 8px; font-size: 14px; outline: none;
+            transition: border-color 0.2s;
+        }
+        .login-card .field input:focus { border-color: #1565c0; box-shadow: 0 0 0 3px rgba(21,101,192,0.15); }
+        .login-card .btn-row { display: flex; gap: 10px; margin-top: 8px; }
+        .login-card .btn {
+            flex: 1; padding: 11px; border: none; border-radius: 8px;
+            font-size: 15px; font-weight: 600; cursor: pointer;
+            transition: all 0.2s;
+        }
+        .login-card .btn-primary { background: #1565c0; color: white; }
+        .login-card .btn-primary:hover { background: #0d47a1; }
+        .login-card .btn-secondary { background: #f0f0f0; color: #333; }
+        .login-card .btn-secondary:hover { background: #e0e0e0; }
+        .login-card .error { color: #c62828; font-size: 13px; margin-top: 8px; text-align: center; }
+        .login-card .success { color: #2e7d32; font-size: 13px; margin-top: 8px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>📈 模拟比赛辅助工具</h1>
+        <div class="subtitle">同花顺模拟炒股 · 技术分析 · 智能顾问</div>
+
+        <div id="login-form">
+            <div class="field"><label>用户名</label><input id="login-username" placeholder="输入用户名" autocomplete="username"></div>
+            <div class="field"><label>密码</label><input id="login-password" type="password" placeholder="输入密码" autocomplete="current-password"></div>
+            <div class="btn-row">
+                <button class="btn btn-primary" onclick="doLogin()">登录</button>
+                <button class="btn btn-secondary" onclick="doRegister()">注册</button>
+            </div>
+            <div id="login-error" class="error"></div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('login-username').focus();
+
+        document.getElementById('login-password').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') doLogin();
+        });
+
+        async function doLogin() {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            document.getElementById('login-error').textContent = '';
+            if (!username || !password) { document.getElementById('login-error').textContent = '请填写用户名和密码'; return; }
+
+            const resp = await fetch('/api/auth/login', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password})
+            });
+            const data = await resp.json();
+            if (data.ok) { window.location.href = '/'; }
+            else { document.getElementById('login-error').textContent = data.error || '登录失败'; }
+        }
+
+        async function doRegister() {
+            const username = document.getElementById('login-username').value.trim();
+            const password = document.getElementById('login-password').value;
+            document.getElementById('login-error').textContent = '';
+            if (!username || !password) { document.getElementById('login-error').textContent = '请填写用户名和密码'; return; }
+            if (password.length < 4) { document.getElementById('login-error').textContent = '密码至少 4 个字符'; return; }
+
+            const resp = await fetch('/api/auth/register', {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username, password})
+            });
+            const data = await resp.json();
+            if (data.ok) { window.location.href = '/'; }
+            else { document.getElementById('login-error').textContent = data.error || '注册失败'; }
+        }
+    </script>
+</body>
+</html>
+"""
+
+
 INDEX_HTML = r"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -643,6 +852,38 @@ INDEX_HTML = r"""<!DOCTYPE html>
         .dialog .field input { width: 100%; }
         .dialog .btn-row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 
+        /* 个股详情弹窗 */
+        .stock-detail {
+            font-size: 14px; line-height: 1.6;
+        }
+        .stock-detail .detail-header {
+            text-align: center; margin-bottom: 16px;
+        }
+        .stock-detail .detail-header h2 {
+            font-size: 22px; margin-bottom: 4px;
+        }
+        .stock-detail .detail-header .price {
+            font-size: 28px; font-weight: 700;
+        }
+        .stock-detail .detail-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 8px 20px;
+        }
+        .stock-detail .detail-item {
+            display: flex; justify-content: space-between; padding: 6px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .stock-detail .detail-item .label { color: #888; }
+        .stock-detail .detail-item .value { font-weight: 500; }
+        .stock-detail .reasons {
+            margin-top: 12px; padding: 10px; background: #f8f9ff;
+            border-radius: 8px; font-size: 13px;
+        }
+        .stock-detail .reasons li { margin: 4px 0; }
+        .stock-detail .stop-loss {
+            margin-top: 8px; padding: 8px 12px; background: #fff3cd;
+            border-radius: 6px; font-size: 13px;
+        }
+
         /* 思考动画 */
         .thinking-indicator {
             display: flex; align-items: center; gap: 10px;
@@ -674,8 +915,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <h1>📈 模拟比赛辅助工具</h1>
             <div class="subtitle">同花顺模拟炒股 | 技术分析 · 智能顾问</div>
         </div>
-        <div>
+        <div style="display:flex;align-items:center;gap:12px">
             <span id="statusText" style="font-size:12px;opacity:0.8">就绪</span>
+            <span id="userDisplay" style="font-size:12px;color:rgba(255,255,255,0.9)"></span>
+            <button onclick="doLogout()" style="background:rgba(255,255,255,0.2);border:none;color:white;padding:4px 10px;border-radius:6px;cursor:pointer;font-size:12px">退出</button>
         </div>
     </div>
 
@@ -794,6 +1037,32 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- 个股详情弹窗 -->
+    <div id="detail-dialog" class="dialog-overlay" style="display:none" onclick="closeDetailDialog(event)">
+        <div class="dialog" style="min-width:480px;max-width:560px" onclick="event.stopPropagation()">
+            <div class="stock-detail" id="detail-content">
+                <div class="detail-header">
+                    <h2 id="detail-name">—</h2>
+                    <div class="price" id="detail-price">—</div>
+                    <div id="detail-rec" style="margin-top:6px"></div>
+                </div>
+                <div class="detail-grid">
+                    <div class="detail-item"><span class="label">RSI</span><span class="value" id="detail-rsi">—</span></div>
+                    <div class="detail-item"><span class="label">评分</span><span class="value" id="detail-score">—</span></div>
+                    <div class="detail-item"><span class="label">MA 交叉</span><span class="value" id="detail-ma">—</span></div>
+                    <div class="detail-item"><span class="label">MACD</span><span class="value" id="detail-macd">—</span></div>
+                    <div class="detail-item"><span class="label">MA20 位置</span><span class="value" id="detail-ma20">—</span></div>
+                    <div class="detail-item"><span class="label">量比</span><span class="value" id="detail-vol">—</span></div>
+                </div>
+                <div class="reasons" id="detail-reasons"></div>
+                <div class="stop-loss" id="detail-stop"></div>
+            </div>
+            <div class="btn-row" style="margin-top:12px">
+                <button class="btn" onclick="closeDetailDialog()">关闭</button>
+            </div>
+        </div>
+    </div>
+
     <div class="status-bar">
         <span id="statusBar">就绪</span>
         <span style="float:right" id="timeDisplay"></span>
@@ -896,7 +1165,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
             }
             tbody.innerHTML = data.map(item => {
                 const cells = rowFn(item);
-                return '<tr>' + cells.map(c => '<td>' + c + '</td>').join('') + '</tr>';
+                const sym = item.symbol || '';
+                const name = item.name || '';
+                return '<tr data-symbol="' + sym + '" data-name="' + name + '" style="cursor:pointer">' + 
+                       cells.map(c => '<td>' + c + '</td>').join('') + '</tr>';
             }).join('');
         }
 
@@ -1011,6 +1283,89 @@ INDEX_HTML = r"""<!DOCTYPE html>
             document.getElementById('dialog-overlay').style.display = 'none';
             _sellData = null;
         }
+
+        function closeDetailDialog(e) {
+            document.getElementById('detail-dialog').style.display = 'none';
+        }
+
+        async function showStockDetail(symbol, name) {
+            const dialog = document.getElementById('detail-dialog');
+            const content = document.getElementById('detail-content');
+            dialog.style.display = 'flex';
+            document.getElementById('detail-name').textContent = name + ' (' + symbol + ')';
+            document.getElementById('detail-price').textContent = '加载中…';
+            document.getElementById('detail-rsi').textContent = '…';
+            document.getElementById('detail-score').textContent = '…';
+            document.getElementById('detail-ma').textContent = '…';
+            document.getElementById('detail-macd').textContent = '…';
+            document.getElementById('detail-ma20').textContent = '…';
+            document.getElementById('detail-vol').textContent = '…';
+            document.getElementById('detail-rec').innerHTML = '';
+            document.getElementById('detail-reasons').innerHTML = '';
+            document.getElementById('detail-stop').innerHTML = '';
+
+            // 先拉实时行情
+            try {
+                const q = await fetch('/api/quote/' + symbol).then(r => r.json());
+                if (q.price) {
+                    document.getElementById('detail-price').textContent = q.price.toFixed(2) + ' 元';
+                    if (q.change !== undefined) {
+                        const cls = q.change >= 0 ? 'up' : 'down';
+                        document.getElementById('detail-price').innerHTML =
+                            q.price.toFixed(2) + ' 元 <span class="' + cls + '">' +
+                            (q.change >= 0 ? '+' : '') + q.change.toFixed(2) + '%</span>';
+                    }
+                }
+            } catch(e) {}
+
+            // 技术分析
+            try {
+                const resp = await fetch('/api/analyze/' + symbol);
+                const d = await resp.json();
+
+                document.getElementById('detail-rsi').textContent = d.rsi != null ? d.rsi.toFixed(1) : '无数据';
+                document.getElementById('detail-score').textContent = d.score ?? '—';
+
+                const maText = d.ma_cross === 'golden' ? '✅ 金叉' : d.ma_cross === 'dead' ? '❌ 死叉' : '—';
+                document.getElementById('detail-ma').textContent = maText;
+
+                const macdText = d.macd_cross === 'golden' ? '✅ 金叉' : d.macd_cross === 'dead' ? '❌ 死叉' : '—';
+                document.getElementById('detail-macd').textContent = macdText;
+
+                const ma20Text = d.price_vs_ma20 === 'above' ? '✅ 线上' : d.price_vs_ma20 === 'below' ? '❌ 线下' : '—';
+                document.getElementById('detail-ma20').textContent = ma20Text;
+
+                document.getElementById('detail-vol').textContent =
+                    d.vol_ratio != null ? d.vol_ratio + '倍 (' + (d.vol_signal === 'up' ? '放量' : d.vol_signal === 'down' ? '缩量' : '正常') + ')' : '—';
+
+                if (d.recommendation) {
+                    document.getElementById('detail-rec').innerHTML =
+                        '<span class="badge" style="background:' + (d.rec_color || '#757575') + '">' +
+                        d.recommendation + '</span>';
+                }
+
+                if (d.reason && d.reason.length) {
+                    document.getElementById('detail-reasons').innerHTML =
+                        '<strong>信号分析：</strong><ul><li>' + d.reason.join('</li><li>') + '</li></ul>';
+                }
+
+                if (d.stop_reason) {
+                    document.getElementById('detail-stop').innerHTML = '⚠️ ' + d.stop_reason;
+                }
+            } catch(e) {
+                document.getElementById('detail-rsi').textContent = '分析失败';
+            }
+        }
+
+        // 双击股票行弹出详情
+        document.addEventListener('dblclick', function(e) {
+            const row = e.target.closest('tr[data-symbol]');
+            if (row) {
+                const sym = row.getAttribute('data-symbol');
+                const name = row.getAttribute('data-name');
+                if (sym) showStockDetail(sym, name || sym);
+            }
+        });
 
         async function confirmAddHolding() {
             const symbol = document.getElementById('dlg-symbol').value.trim();
@@ -1199,6 +1554,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
         // ── 初始化 ─────────────────────────────────────────
         document.addEventListener('DOMContentLoaded', () => {
+            loadUserInfo();
             loadMarketData();
             loadHoldings();
             loadAiHistory();
@@ -1207,6 +1563,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
             setInterval(updateTime, 1000);
             startAutoRefresh();
         });
+
+        async function loadUserInfo() {
+            try {
+                const resp = await fetch('/api/auth/me');
+                const data = await resp.json();
+                if (data.logged_in) {
+                    document.getElementById('userDisplay').textContent = '👤 ' + data.username;
+                }
+            } catch(e) {}
+        }
+
+        async function doLogout() {
+            await fetch('/api/auth/logout', {method: 'POST'});
+            window.location.href = '/login';
+        }
 
         function updateTime() {
             const now = new Date();
