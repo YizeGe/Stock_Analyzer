@@ -933,6 +933,36 @@ INDEX_HTML = r"""<!DOCTYPE html>
         @media (max-width: 1024px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
         @media (max-width: 768px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
 
+        /* ── 手机端适配 ─────────────────────────────────── */
+        @media (max-width: 768px) {
+            .app-header { flex-direction: column; gap: 8px; padding: 10px 16px; }
+            .app-header h1 { font-size: 16px; }
+            .app-header .subtitle { font-size: 10px; }
+            #search-input { width: 100% !important; }
+            .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .tab-btn { padding: 10px 14px; font-size: 12px; white-space: nowrap; }
+            .tab-content { padding: 8px; }
+            .panel { padding: 10px; }
+            .panel-title { font-size: 13px; }
+            .scroll-table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .scroll-table table { font-size: 11px; }
+            .scroll-table th, .scroll-table td { padding: 5px 6px; white-space: nowrap; }
+            .stock-detail .detail-grid { grid-template-columns: 1fr; }
+            #detail-dialog .dialog { min-width: auto !important; width: 92vw; }
+            .chat-box { height: 350px; }
+            .chat-msg { max-width: 95%; font-size: 12px; }
+            .status-bar { font-size: 10px; flex-wrap: wrap; gap: 4px; }
+            .search-dropdown { left: 8px; right: 8px; }
+            .grid-3 { gap: 8px; }
+            #sell-dialog .dialog { min-width: auto !important; width: 92vw; }
+        }
+        @media (max-width: 480px) {
+            .tab-btn { padding: 8px 10px; font-size: 11px; }
+            .scroll-table table { font-size: 10px; }
+            .scroll-table th, .scroll-table td { padding: 4px 4px; }
+            .dialog { width: 95vw !important; min-width: auto !important; padding: 16px; }
+        }
+
         .loading { text-align: center; padding: 40px; color: #999; }
 
         .btn {
@@ -1055,7 +1085,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <input id="search-input" type="text" placeholder="搜股票代码/名称…"
                        oninput="searchStocks(this.value)" onkeydown="if(event.key==='Enter')doSearch(this.value)"
                        style="padding:6px 12px;border:none;border-radius:6px;width:220px;font-size:13px;outline:none">
-                <div id="search-results" class="search-dropdown" style="display:none"></div>
+                <div id="search-results" class="search-dropdown" style="display:none;position:absolute"></div>
             </div>
         </div>
         <div style="display:flex;align-items:center;gap:12px">
