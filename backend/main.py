@@ -85,7 +85,7 @@ os.makedirs(frontend_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
 # Session 中间件（用于登录状态）
-app.add_middleware(SessionMiddleware, secret_key="stock-analyzer-secret-key-2026")
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SESSION_SECRET", "stock-analyzer-secret-key-2026"))
 
 
 # ── 辅助函数 ────────────────────────────────────────────
