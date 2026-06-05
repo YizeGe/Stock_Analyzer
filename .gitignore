@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+web_venv/
+
+# 个人数据
+userdata/
+
+# 操作系统
+.DS_Store
+
+# 私人图片（不上传到 GitHub）
+frontend/水月.png
