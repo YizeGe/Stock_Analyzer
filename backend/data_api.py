@@ -11,6 +11,14 @@ _requests.Session.trust_env = False
 import pandas as pd
 import datetime
 import json
+import time as _time
+import threading as _threading
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 🚨 设置全局 Socket 默认超时，防止第三方库在网络接口卡死时无限阻塞线程
+socket.setdefaulttimeout(6.0)
+
 
 
 def _to_native(v):
@@ -39,6 +47,28 @@ SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
     "Referer": "https://finance.sina.com.cn",
 })
+
+
+# ── 缓存机制（避免重复网络请求）────────────────────────
+_cache = {}
+_cache_lock = _threading.Lock()
+
+
+def _get_cached(key, ttl=60):
+    """获取缓存，过期返回 None"""
+    with _cache_lock:
+        if key in _cache:
+            val, ts = _cache[key]
+            if _time.time() - ts < ttl:
+                return val
+    return None
+
+
+def _set_cached(key, value):
+    """设置缓存（仅缓存非 None 值）"""
+    if value is not None:
+        with _cache_lock:
+            _cache[key] = (value, _time.time())
 
 
 # ── 工具函数 ─────────────────────────────────────────────
@@ -125,54 +155,104 @@ def fetch_batch_quotes(symbols):
 # ── 历史 K 线 ───────────────────────────────────────────
 
 def fetch_historical_data(symbol, period="daily", start_date=None, end_date=None):
-    """获取历史K线，优先 akshare，备选新浪"""
+    """获取历史K线，优先新浪，备选 akshare"""
+    cache_key = f"hist_data_{symbol}_{period}_{start_date}_{end_date}"
+    cached = _get_cached(cache_key, ttl=120)
+    if cached is not None:
+        return cached
+
+    # 1. 优先使用新浪接口（非常快且稳定）
+    try:
+        sina_sym = _sina_symbol(symbol)
+        datalen = 150  # 增加到 150，确保 MA20/MACD/RSI 等计算有足够的数据深度
+        url = (f"https://quotes.sina.cn/cn/api/jsonp_v2.php"
+               f"/var%20_{sina_sym}=/CN_MarketDataService.getKLineData"
+               f"?symbol={sina_sym}&scale=240&datalen={datalen}")
+        resp = SESSION.get(url, timeout=4)
+        text = resp.text
+        if "=(" in text:
+            idx = text.index("=(")
+            json_part = text[idx + 2:].rstrip(";").rstrip(")")
+            data = json.loads(json_part)
+            if data:
+                df = pd.DataFrame(data)
+                df.rename(columns={
+                    "day": "date", "open": "open", "high": "high",
+                    "low": "low", "close": "close", "volume": "volume",
+                }, inplace=True)
+                df.columns = [c.lower() for c in df.columns]
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                if start_date:
+                    start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
+                    df = df[df["date"] >= start_str]
+                if end_date:
+                    end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
+                    df = df[df["date"] <= end_str]
+                if not df.empty:
+                    _set_cached(cache_key, df)
+                    return df
+    except Exception as e:
+        print(f"新浪历史K线失败 {symbol}: {e}")
+
+    # 2. 如果新浪接口失败，使用 akshare 作为备份
     try:
         import akshare as ak
         df = ak.stock_zh_a_hist(symbol=symbol, period=period,
                                 start_date=start_date, end_date=end_date, adjust="")
         if df is not None and not df.empty:
             df.columns = [c.lower() for c in df.columns]
+            _set_cached(cache_key, df)
             return df
-    except Exception:
-        pass
-
-    try:
-        sina_sym = _sina_symbol(symbol)
-        datalen = 60
-        url = (f"https://quotes.sina.cn/cn/api/jsonp_v2.php"
-               f"/var%20_{sina_sym}=/CN_MarketDataService.getKLineData"
-               f"?symbol={sina_sym}&scale=240&datalen={datalen}")
-        resp = SESSION.get(url, timeout=5)
-        text = resp.text
-        marker = "=("
-        idx = text.index(marker)
-        json_part = text[idx + len(marker):].rstrip(";").rstrip(")")
-        data = json.loads(json_part)
-        if not data:
-            return None
-        df = pd.DataFrame(data)
-        df.rename(columns={
-            "day": "date", "open": "open", "high": "high",
-            "low": "low", "close": "close", "volume": "volume",
-        }, inplace=True)
-        df.columns = [c.lower() for c in df.columns]
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        if start_date:
-            start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-            df = df[df["date"] >= start_str]
-        if end_date:
-            end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
-            df = df[df["date"] <= end_str]
-        return df
     except Exception as e:
-        print(f"新浪历史K线失败 {symbol}: {e}")
+        print(f"akshare历史K线备份失败 {symbol}: {e}")
+
     return None
 
 
 def fetch_index_historical(index_code="sh000001", start_date=None, end_date=None):
-    """获取指数历史K线"""
+    """获取指数历史K线，优先新浪，备选 akshare"""
+    cache_key = f"index_hist_{index_code}_{start_date}_{end_date}"
+    cached = _get_cached(cache_key, ttl=120)
+    if cached is not None:
+        return cached
+
+    # 1. 优先使用新浪接口（非常快且稳定）
+    try:
+        datalen = 150
+        url = (f"https://quotes.sina.cn/cn/api/jsonp_v2.php"
+               f"/var%20_{index_code}=/CN_MarketDataService.getKLineData"
+               f"?symbol={index_code}&scale=240&datalen={datalen}")
+        resp = SESSION.get(url, timeout=4)
+        text = resp.text
+        if "=(" in text:
+            idx = text.index("=(")
+            json_part = text[idx + 2:].rstrip(";").rstrip(")")
+            data = json.loads(json_part)
+            if data:
+                df = pd.DataFrame(data)
+                df.rename(columns={
+                    "day": "date", "open": "open", "high": "high",
+                    "low": "low", "close": "close", "volume": "volume",
+                }, inplace=True)
+                df.columns = [c.lower() for c in df.columns]
+                for col in ["open", "high", "low", "close", "volume"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                if start_date:
+                    start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
+                    df = df[df["date"] >= start_str]
+                if end_date:
+                    end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
+                    df = df[df["date"] <= end_str]
+                if not df.empty:
+                    _set_cached(cache_key, df)
+                    return df
+    except Exception as e:
+        print(f"新浪指数K线失败 {index_code}: {e}")
+
+    # 2. 如果新浪接口失败，使用 akshare 作为备份
     try:
         import akshare as ak
         df = ak.stock_zh_index_daily(symbol=index_code)
@@ -184,41 +264,11 @@ def fetch_index_historical(index_code="sh000001", start_date=None, end_date=None
             if end_date:
                 end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
                 df = df[df["date"] <= end_str]
+            _set_cached(cache_key, df)
             return df
-    except Exception:
-        pass
-
-    try:
-        datalen = 60
-        url = (f"https://quotes.sina.cn/cn/api/jsonp_v2.php"
-               f"/var%20_{index_code}=/CN_MarketDataService.getKLineData"
-               f"?symbol={index_code}&scale=240&datalen={datalen}")
-        resp = SESSION.get(url, timeout=5)
-        text = resp.text
-        marker = "=("
-        idx = text.index(marker)
-        json_part = text[idx + len(marker):].rstrip(";").rstrip(")")
-        data = json.loads(json_part)
-        if not data:
-            return None
-        df = pd.DataFrame(data)
-        df.rename(columns={
-            "day": "date", "open": "open", "high": "high",
-            "low": "low", "close": "close", "volume": "volume",
-        }, inplace=True)
-        df.columns = [c.lower() for c in df.columns]
-        for col in ["open", "high", "low", "close", "volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        if start_date:
-            start_str = f"{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}"
-            df = df[df["date"] >= start_str]
-        if end_date:
-            end_str = f"{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}"
-            df = df[df["date"] <= end_str]
-        return df
     except Exception as e:
-        print(f"指数历史K线获取失败 {index_code}: {e}")
+        print(f"akshare指数K线备份失败 {index_code}: {e}")
+
     return None
 
 
@@ -301,6 +351,9 @@ def calc_volume_ratio(df):
 
 def get_market_status():
     """获取上证指数当前状态"""
+    _cached = _get_cached('market_status', ttl=60)
+    if _cached is not None:
+        return _cached
     today = datetime.date.today()
     start_year = str(today.year - 1)
 
@@ -331,13 +384,20 @@ def get_market_status():
         "above_ma20": bool(above),
         "trend": trend,
     }
-    return _to_native_dict(result)
+    final = _to_native_dict(result)
+    _set_cached('market_status', final)
+    return final
 
 
 # ── 单股信号分析 ────────────────────────────────────────
 
 def analyze_signal(symbol, market_above_ma20=None):
     """综合技术面分析，给出推荐"""
+    cache_key = f"analyze_signal_{symbol}_{market_above_ma20}"
+    cached = _get_cached(cache_key, ttl=120)  # 缓存 120 秒
+    if cached is not None:
+        return cached
+
     stock_name = None
     try:
         sina_sym = _sina_symbol(symbol)
@@ -453,7 +513,7 @@ def analyze_signal(symbol, market_above_ma20=None):
             recommendation, rec_color = rec, clr
             break
 
-    return _to_native_dict(dict(
+    res = _to_native_dict(dict(
         symbol=symbol, name=stock_name or symbol, price=price, rsi=rsi,
         ma_cross=ma_cross, macd_cross=macd_cross, price_cross20=price_cross20,
         price_vs_ma20=("above" if price > ma20_val else "below") if ma20_val else None,
@@ -463,12 +523,17 @@ def analyze_signal(symbol, market_above_ma20=None):
         reason=reasons, stop_loss=stop_loss, stop_loss_pct=stop_pct,
         stop_reason=stop_reason,
     ))
+    _set_cached(cache_key, res)
+    return res
 
 
 # ── 市场数据获取（热门股票）────────────────────────────
 
 def get_hot_stocks(limit=50):
     """涨停池 + 各行业强势代表股"""
+    _cached = _get_cached(f'hot_stocks_{limit}', ttl=60)
+    if _cached is not None:
+        return _cached
     import akshare as ak
 
     zt_stocks = []
@@ -556,11 +621,16 @@ def get_hot_stocks(limit=50):
     zt_syms = {s["symbol"] for s in zt_stocks}
     sector_hot = [s for s in sector_hot if s["symbol"] not in zt_syms][:limit]
 
-    return {"zt_stocks": zt_stocks, "sector_hot": sector_hot, "timestamp": datetime.datetime.now().isoformat()}
+    _result = {"zt_stocks": zt_stocks, "sector_hot": sector_hot, "timestamp": datetime.datetime.now().isoformat()}
+    _set_cached(f'hot_stocks_{limit}', _result)
+    return _result
 
 
 def get_broad_stock_pool(limit_per_cat=20):
     """更广泛的选股池"""
+    _cached = _get_cached(f'broad_pool_{limit_per_cat}', ttl=60)
+    if _cached is not None:
+        return _cached
     dynamic_list = []
     try:
         url = 'http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=60&sort=amount&asc=0&node=hs_a&symbol=&_s_r_a=page'
@@ -618,6 +688,7 @@ def get_broad_stock_pool(limit_per_cat=20):
         except Exception:
             continue
 
+    _set_cached(f'broad_pool_{limit_per_cat}', all_stocks)
     return all_stocks
 
 
@@ -629,29 +700,38 @@ def get_recommended_stocks(symbols, market_above_ma20=None, max_count=20,
     analyzed = []
     zt_pool = []
     watch_pool = []
-    for sym in symbols:
-        res = analyze_signal(sym, market_above_ma20=market_above_ma20)
-        score = res.get("score", 0) if res else 0
-        if res and score >= 1:
-            if not res.get("name"):
-                res["name"] = name_map.get(sym, sym)
-            analyzed.append(res)
-        elif res is None:
-            zt_pool.append({
-                "symbol": sym,
-                "name": name_map.get(sym, sym),
-                "score": 0,
-                "recommendation": "✅ 涨停待分析", "rec_color": "#2e7d32",
-                "reason": ["涨停股（K线数据暂缺）"],
-                "stop_reason": "需结合大盘环境判断",
-                "rsi": None, "vol_ratio": None,
-            })
-        elif res and min_watch_score <= score < 1:
-            if not res.get("name"):
-                res["name"] = name_map.get(sym, sym)
-            res["recommendation"] = "👀 关注"
-            res["rec_color"] = "#1976d2"
-            watch_pool.append(res)
+    # 并行分析，最多 8 线程同时跑（原来串行逐个分析，速度提升 ~4-8 倍）
+    def _analyze_one(sym):
+        try:
+            return sym, analyze_signal(sym, market_above_ma20=market_above_ma20)
+        except Exception:
+            return sym, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(_analyze_one, sym) for sym in symbols]
+        for future in as_completed(futures):
+            sym, res = future.result()
+            score = res.get("score", 0) if res else 0
+            if res and score >= 1:
+                if not res.get("name"):
+                    res["name"] = name_map.get(sym, sym)
+                analyzed.append(res)
+            elif res is None:
+                zt_pool.append({
+                    "symbol": sym,
+                    "name": name_map.get(sym, sym),
+                    "score": 0,
+                    "recommendation": "✅ 涨停待分析", "rec_color": "#2e7d32",
+                    "reason": ["涨停股（K线数据暂缺）"],
+                    "stop_reason": "需结合大盘环境判断",
+                    "rsi": None, "vol_ratio": None,
+                })
+            elif res and min_watch_score <= score < 1:
+                if not res.get("name"):
+                    res["name"] = name_map.get(sym, sym)
+                res["recommendation"] = "👀 关注"
+                res["rec_color"] = "#1976d2"
+                watch_pool.append(res)
 
     analyzed.sort(key=lambda x: x["score"], reverse=True)
     watch_pool.sort(key=lambda x: x["score"], reverse=True)

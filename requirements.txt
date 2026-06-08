@@ -6,3 +6,5 @@ openai>=1.0.0
 akshare>=1.15.0
 numpy>=1.26.0
 python-multipart>=0.0.9
+itsdangerous>=2.2.0
+starlette>=0.41.0

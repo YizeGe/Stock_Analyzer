@@ -80,7 +80,10 @@ app = FastAPI(title="📈 模拟比赛辅助工具 - Web 版")
 
 # 挂载前端静态文件
 from starlette.staticfiles import StaticFiles
-frontend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
+if getattr(sys, 'frozen', False):
+    frontend_dir = os.path.join(sys._MEIPASS, "frontend")
+else:
+    frontend_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend")
 os.makedirs(frontend_dir, exist_ok=True)
 app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
 
@@ -189,7 +192,7 @@ async def api_auth_me(request: Request):
 # ── 大盘状态 ────────────────────────────────────────────
 
 @app.get("/api/market/status")
-async def api_market_status():
+def api_market_status():
     mkt = get_market_status()
     if mkt is None:
         return {"error": "大盘数据获取失败"}
@@ -199,7 +202,7 @@ async def api_market_status():
 # ── 热门股票 / 市场概览 ─────────────────────────────────
 
 @app.get("/api/market/overview")
-async def api_market_overview():
+def api_market_overview():
     """快速市场概览：大盘 + 涨停池 + 行业股（不含全量信号分析）"""
     mkt = get_market_status()
     pools = get_hot_stocks(limit=60)
@@ -217,7 +220,7 @@ async def api_market_overview():
 # ── 单股行情 ├───────────────────────────────────────────
 
 @app.get("/api/quote/{symbol}")
-async def api_quote(symbol: str):
+def api_quote(symbol: str):
     q = fetch_realtime_quote(symbol)
     if q is None:
         return {"error": f"股票 {symbol} 行情获取失败"}
@@ -225,7 +228,7 @@ async def api_quote(symbol: str):
 
 
 @app.get("/api/quote/batch")
-async def api_batch_quote(symbols: str):
+def api_batch_quote(symbols: str):
     """symbols: 逗号分隔的股票代码，如 '600519,000001'"""
     sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
     return fetch_batch_quotes(sym_list)
@@ -234,7 +237,7 @@ async def api_batch_quote(symbols: str):
 # ── 股票搜索 ────────────────────────────────────────────
 
 @app.get("/api/search")
-async def api_search(q: str = ""):
+def api_search(q: str = ""):
     from data_api import search_stocks
     results = search_stocks(q, limit=10)
     return {"results": results, "query": q}
@@ -243,7 +246,7 @@ async def api_search(q: str = ""):
 # ── 单股分析 ────────────────────────────────────────────
 
 @app.get("/api/analyze/{symbol}")
-async def api_analyze(symbol: str):
+def api_analyze(symbol: str):
     res = analyze_signal(symbol)
     if res is None:
         return {"error": f"股票 {symbol} 分析失败（K线数据不足）"}
@@ -253,7 +256,7 @@ async def api_analyze(symbol: str):
 # ── 选股推荐 ────────────────────────────────────────────
 
 @app.get("/api/recommend")
-async def api_recommend():
+def api_recommend():
     """快速推荐：只分析涨停池 + 行业股的前20只，减少耗时"""
     mkt = get_market_status()
     pools = get_hot_stocks(limit=30)
@@ -318,7 +321,7 @@ async def api_save_config(req: Request):
 # ── 持仓 ────────────────────────────────────────────────
 
 @app.get("/api/holdings")
-async def api_get_holdings(request: Request):
+def api_get_holdings(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "未登录"}, status_code=401)
@@ -469,7 +472,7 @@ async def api_remove_holding(req: Request):
 # ── 交易流水 ────────────────────────────────────────────
 
 @app.get("/api/trades")
-async def api_get_trades(request: Request):
+def api_get_trades(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "未登录"}, status_code=401)
@@ -479,11 +482,20 @@ async def api_get_trades(request: Request):
 # ── AI 顾问 ─────────────────────────────────────────────
 
 @app.get("/api/ai/history")
-async def api_ai_history(request: Request):
+def api_ai_history(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "未登录"}, status_code=401)
     return load_ai_history(username=user)
+
+
+@app.post("/api/ai/history/clear")
+def api_ai_history_clear(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "未登录"}, status_code=401)
+    save_ai_history([], username=user)
+    return {"ok": True}
 
 
 @app.post("/api/ai/chat")
@@ -1173,6 +1185,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
                 <input type="text" id="ai-input" placeholder="说点什么…（如「买了 600519 100股 1800」）"
                        onkeydown="if(event.key==='Enter') sendAiMessage()">
                 <button class="btn btn-primary" onclick="sendAiMessage()">发送</button>
+                <button class="btn btn-sm" onclick="openAiTradeDialog()">📝 规范记账</button>
                 <button class="btn btn-sm" onclick="requestAiAdvice()">💡 求建议</button>
                 <button class="btn btn-sm" onclick="clearAiChat()">清空</button>
             </div>
@@ -1258,6 +1271,36 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- 规范记账弹窗 -->
+    <div id="ai-trade-dialog" class="dialog-overlay" style="display:none" onclick="document.getElementById('ai-trade-dialog').style.display='none'">
+        <div class="dialog" style="min-width:320px" onclick="event.stopPropagation()">
+            <h3 style="margin-top:0">📝 规范化记录交易</h3>
+            <div class="field">
+                <label>操作类型</label>
+                <select id="ai-dlg-action" style="width:100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="买入">买入 (BUY)</option>
+                    <option value="卖出">卖出 (SELL)</option>
+                </select>
+            </div>
+            <div class="field">
+                <label>股票代码 (6位)</label>
+                <input type="text" id="ai-dlg-symbol" placeholder="例如: 600519" style="width:100%">
+            </div>
+            <div class="field">
+                <label>数量 (股)</label>
+                <input type="number" id="ai-dlg-shares" placeholder="例如: 100" style="width:100%">
+            </div>
+            <div class="field">
+                <label>单价 (元)</label>
+                <input type="number" step="0.01" id="ai-dlg-price" placeholder="例如: 1800.5" style="width:100%">
+            </div>
+            <div class="btn-row" style="margin-top:16px">
+                <button class="btn" onclick="document.getElementById('ai-trade-dialog').style.display='none'">取消</button>
+                <button class="btn btn-primary" onclick="submitAiTrade()">发送给 AI</button>
+            </div>
+        </div>
+    </div>
+
     <div class="status-bar">
         <span><span id="statusBar">就绪</span> <span id="statusExtra" style="color:#888"></span></span>
         <span>
@@ -1269,6 +1312,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <script>
         // ── Tab 切换 ──────────────────────────────────────
         function switchTab(name) {
+            if (name === 'ai') {
+                const apiKey = document.getElementById('setting-apikey').value.trim();
+                if (!apiKey) {
+                    alert('首次使用 AI 顾问需要配置 DeepSeek API Key。请在设置中配置。');
+                    name = 'settings';
+                }
+            }
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.getElementById('tab-' + name).classList.add('active');
@@ -1708,8 +1758,43 @@ INDEX_HTML = r"""<!DOCTYPE html>
             await sendAiMessage();
         }
 
-        function clearAiChat() {
-            document.getElementById('ai-chat').innerHTML = '';
+        async function clearAiChat() {
+            if (!confirm('确定要彻底清空 AI 的全部记忆吗？')) return;
+            try {
+                const resp = await fetch('/api/ai/history/clear', { method: 'POST' });
+                if (resp.ok) {
+                    document.getElementById('ai-chat').innerHTML = '';
+                    appendChat('🧹 AI 记忆已清空', 'system');
+                } else {
+                    alert('清空记忆失败，请稍后重试');
+                }
+            } catch(e) {
+                alert('清空记忆异常: ' + e.message);
+            }
+        }
+
+        function openAiTradeDialog() {
+            document.getElementById('ai-dlg-symbol').value = '';
+            document.getElementById('ai-dlg-shares').value = '';
+            document.getElementById('ai-dlg-price').value = '';
+            document.getElementById('ai-trade-dialog').style.display = 'flex';
+        }
+
+        function submitAiTrade() {
+            const action = document.getElementById('ai-dlg-action').value;
+            const symbol = document.getElementById('ai-dlg-symbol').value.trim();
+            const shares = document.getElementById('ai-dlg-shares').value;
+            const price = document.getElementById('ai-dlg-price').value;
+            
+            if (!symbol || !shares || !price) {
+                alert('请填写完整的股票代码、数量和单价！');
+                return;
+            }
+            
+            document.getElementById('ai-trade-dialog').style.display = 'none';
+            const msg = `记录交易：${action} ${symbol} ${shares}股 单价${price}元`;
+            document.getElementById('ai-input').value = msg;
+            sendAiMessage();
         }
 
         // ── AI 思考动画 ────────────────────────────────────

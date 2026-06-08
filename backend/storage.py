@@ -3,6 +3,7 @@
 """
 import json
 import os
+import sys
 import datetime
 import hashlib
 import random
@@ -38,7 +39,12 @@ def generate_captcha() -> tuple:
 
 
 def get_base_dir():
-    """项目根目录"""
+    """项目根目录（开发模式）或用户数据目录（打包模式）"""
+    if getattr(sys, 'frozen', False):
+        # PyInstaller / py2app 打包模式 — 用户数据存到 home 目录
+        base = os.path.join(os.path.expanduser('~'), '.stock_analyzer')
+        os.makedirs(base, exist_ok=True)
+        return base
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
