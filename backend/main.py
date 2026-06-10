@@ -913,7 +913,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
         .tab-btn:hover { background: #f0f0f0; }
         .tab-btn.active { color: #1565c0; border-bottom-color: #1565c0; background: #e3f2fd; }
 
-        .tab-content { padding: 16px; display: none; }
+        .tab-content { padding: 16px calc(37vw + 15px) 16px 16px; display: none; }
         .tab-content.active { display: block; }
 
         .panel { background: white; border-radius: 8px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
@@ -942,8 +942,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
         .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 
-        @media (max-width: 1024px) { .grid-3 { grid-template-columns: 1fr 1fr; } }
-        @media (max-width: 768px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+        @media (max-width: 1024px) { .grid-3 { grid-template-columns: 1fr 1fr; } .tab-content { padding: 16px; } .app-header { padding: 14px 24px; } }
+        @media (max-width: 768px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } .tab-content { padding: 8px; } .app-header { padding: 10px 16px; } }
 
         /* ── 手机端适配 ─────────────────────────────────── */
         @media (max-width: 768px) {
@@ -1012,6 +1012,70 @@ INDEX_HTML = r"""<!DOCTYPE html>
             background: #333; color: #ccc; padding: 6px 16px;
             font-size: 12px; font-family: monospace; position: fixed; bottom: 0;
             left: 0; right: 0; z-index: 100; display: flex; justify-content: space-between;
+        }
+
+        /* ── Live2D 看板娘 ──────────────────────────── */
+        #live2d-canvas {
+            position: fixed;
+            bottom: 28px;
+            right: -10px;
+            z-index: 150;
+            cursor: pointer;
+        }
+        @media (max-width: 768px) {
+            #live2d-canvas { right: 2px; bottom: 22px; }
+        }
+
+        /* ── 看板娘对话气泡 ──────────────────────────── */
+        #live2d-bubble {
+            position: fixed;
+            max-width: 220px;
+            padding: 12px 16px;
+            background: #fff;
+            border: 2px solid #1565c0;
+            border-radius: 16px;
+            font-size: 13px;
+            line-height: 1.5;
+            color: #333;
+            z-index: 151;
+            opacity: 0;
+            transform: translate(-50%, 0) translateY(8px);
+            transition: opacity 0.3s, transform 0.3s;
+            pointer-events: none;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+            left: 0;
+            top: 0;
+        }
+        #live2d-bubble.show {
+            opacity: 1;
+            transform: translate(-50%, 0) translateY(0);
+        }
+        #live2d-bubble::after {
+            content: '';
+            position: absolute;
+            bottom: -10px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 10px solid transparent;
+            border-right: 10px solid transparent;
+            border-top: 10px solid #fff;
+        }
+        #live2d-bubble::before {
+            content: '';
+            position: absolute;
+            bottom: -14px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 12px solid transparent;
+            border-right: 12px solid transparent;
+            border-top: 12px solid #1565c0;
+        }
+        @media (max-width: 768px) {
+            #live2d-bubble { max-width: 160px; font-size: 11px; }
         }
 
         .dialog-overlay {
@@ -1142,7 +1206,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             <div class="panel">
                 <div class="panel-title">⭐ 技术面推荐</div>
                 <div class="scroll-table" style="max-height:450px">
-                    <table><thead><tr><th>代码</th><th>名称</th><th>评分</th><th>推荐</th><th>RSI</th><th>信号</th><th>止损</th></tr></thead>
+                    <table><thead><tr><th>代码</th><th>名称</th><th>评分</th><th>推荐</th><th>RSI</th></tr></thead>
                     <tbody id="rec-table"></tbody></table>
                 </div>
             </div>
@@ -1194,17 +1258,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <!-- Tab: 设置 -->
     <div id="tab-settings" class="tab-content">
-        <div style="display:flex;gap:20px;align-items:flex-start">
-            <div class="panel" style="flex:0 0 420px">
-                <div class="panel-title">⚙️ 设置</div>
-                <div class="field"><label>DeepSeek API Key</label><input type="password" id="setting-apikey" style="width:100%"></div>
-                <div class="field"><label>总资金</label><input type="number" id="setting-total-cash" style="width:100%"></div>
-                <div class="field"><label>可用现金</label><input type="number" id="setting-avail-cash" style="width:100%"></div>
-                <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
-            </div>
-            <div style="flex:1;text-align:center">
-                <img src="/static/水月.png" style="width:100%;max-width:800px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,0.1)" alt="水月">
-            </div>
+        <div class="panel" style="max-width:600px">
+            <div class="panel-title">⚙️ 设置</div>
+            <div class="field"><label>DeepSeek API Key</label><input type="password" id="setting-apikey" style="width:100%;padding:10px 14px"></div>
+            <div class="field"><label>总资金</label><input type="number" id="setting-total-cash" style="width:100%;padding:10px 14px"></div>
+            <div class="field"><label>可用现金</label><input type="number" id="setting-avail-cash" style="width:100%;padding:10px 14px"></div>
+            <button class="btn btn-primary" onclick="saveSettings()" style="padding:10px 24px;font-size:14px">保存设置</button>
         </div>
     </div>
 
@@ -1301,6 +1360,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
         </div>
     </div>
 
+    <!-- Live2D 看板娘 -->
+    <canvas id="live2d-canvas"></canvas>
+    <div id="live2d-bubble"></div>
+
     <div class="status-bar">
         <span><span id="statusBar">就绪</span> <span id="statusExtra" style="color:#888"></span></span>
         <span>
@@ -1341,7 +1404,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
             setStatus('正在加载市场数据…');
             document.getElementById('zt-table').innerHTML = '<tr><td colspan="4" class="loading">加载中…</td></tr>';
             document.getElementById('sector-table').innerHTML = '<tr><td colspan="5" class="loading">加载中…</td></tr>';
-            document.getElementById('rec-table').innerHTML = '<tr><td colspan="7" class="loading">加载中…</td></tr>';
+            document.getElementById('rec-table').innerHTML = '<tr><td colspan="5" class="loading">加载中…</td></tr>';
 
             try {
                 // 1. 快速加载大盘+涨停池+行业股
@@ -1379,14 +1442,12 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     s => [s.symbol || '—', s.name || '—',
                           s.score ?? '—',
                           `<span class="badge" style="background:${s.rec_color||'#757575'}">${s.recommendation||'—'}</span>`,
-                          s.rsi != null ? s.rsi.toFixed(1) : '—',
-                          (s.reason||[]).join(', ') || '—',
-                          s.stop_reason || '—']);
+                          s.rsi != null ? s.rsi.toFixed(1) : '—']);
 
                 setStatus(`推荐:${(data.recommended||[]).length} 只 | 关注:${(data.watching||[]).length} 只`);
             } catch(e) {
                 document.getElementById('rec-table').innerHTML =
-                    '<tr><td colspan="7" class="loading">❌ 分析失败，点击 <a href="#" onclick="loadRecommendations()">重试</a></td></tr>';
+                    '<tr><td colspan="5" class="loading">❌ 分析失败，点击 <a href="#" onclick="loadRecommendations()">重试</a></td></tr>';
                 setStatus('❌ 技术分析失败: ' + e.message);
             }
         }
@@ -2013,6 +2074,13 @@ INDEX_HTML = r"""<!DOCTYPE html>
             }
         }
     </script>
+
+    <!-- Live2D: Pixi → CubismCore → Cubism4 → Widget -->
+    <script src="/static/live2d/pixi.min.js"></script>
+    <script src="/static/live2d/live2dcubismcore.min.js"></script>
+    <script>window.process = { env: { NODE_ENV: 'production' }, browser: true };</script>
+    <script src="/static/live2d/cubism4.min.js"></script>
+    <script src="/static/live2d/widget-light.js"></script>
 </body>
 </html>
 """

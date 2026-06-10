@@ -6,10 +6,23 @@ web_venv/
 
 # 个人数据
 userdata/
+users.json
 
 # 操作系统
 .DS_Store
 
 # 私人图片（不上传到 GitHub）
 frontend/水月.png
-users.json
+
+# PyInstaller 打包产物
+app_bundle/build/
+app_bundle/dist/
+
+# Live2D 模型文件（版权原因，请自行获取）
+frontend/live2d/*.moc3
+frontend/live2d/*.model3.json
+frontend/live2d/*.cdi3.json
+frontend/live2d/*.1024/
+frontend/live2d/pixi.min.js
+frontend/live2d/live2dcubismcore.min.js
+frontend/live2d/cubism4.min.js

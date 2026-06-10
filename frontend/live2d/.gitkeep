@@ -1,0 +1,14 @@
+# Live2D 模型文件目录
+# 
+# 此目录下需要放置你自己的 Live2D Cubism 4 模型文件：
+#   你的模型.model3.json
+#   你的模型.moc3
+#   你的模型.cdi3.json
+#   你的模型.1024/texture_00.png
+#
+# 另外需要以下 JS 库（从 npm/unpkg 获取）：
+#   pixi.min.js           - PixiJS v7 渲染引擎
+#   live2dcubismcore.min.js - Live2D Cubism Core (从官方SDK获取)
+#   cubism4.min.js         - pixi-live2d-display Cubism 4 支持
+#
+# 以上模型文件和 JS 库均不上传 GitHub，请自行获取。
